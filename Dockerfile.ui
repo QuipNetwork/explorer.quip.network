@@ -50,5 +50,41 @@ ENV NEXT_PUBLIC_NETWORK_NAME="${BAKE_PROD_ENV:+Quip Testnet}" \
     NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS=${BAKE_PROD_ENV:+18} \
     NEXT_PUBLIC_NETWORK_RPC_URL=${BAKE_PROD_ENV:+https://evm-rpc.testnet.quip.network:20049/}
 
+# ── Optional feature surface, held OFF ──────────────────────────────────────
+#
+# The Blockscout frontend ships a large catalogue of optional integrations. It
+# prints an enabled/disabled checklist at boot, and an unconfigured image
+# reports SIX enabled — of which three do not belong on a Quip testnet explorer:
+#
+#   Banner ads / Text ads   ENABLED BY DEFAULT. Upstream's own docs: "ads are
+#                           enabled by default on all self-hosted instances."
+#                           Left alone, a Quip-branded explorer serves
+#                           third-party crypto advertising and loads an ad
+#                           network's scripts into every visitor's browser.
+#                           `none` is the documented off value for both.
+#
+#   Gas tracker             The chain has a static 1 gwei base fee and near-zero
+#                           activity; /api/v2/stats returns null for every gas
+#                           price. The widget renders empty and reads as broken.
+#
+#   Marketplace (DappScout) Already off in this image, but pinned explicitly
+#                           because it is off only by DEFAULT — a base-image bump
+#                           could flip it on, and this is a floating upstream
+#                           image we do not control.
+#
+# Kept ON, deliberately: Advanced filter; API documentation (directly useful for
+# the dev-onboarding half of QUI-905); and Web3 wallet integration, which is what
+# gives users "add Quip Testnet to MetaMask" — the single most useful button on a
+# testnet explorer.
+#
+# NOT set here: Merits/rewards, Mixpanel, GrowthBook and Google Analytics. Those
+# activate only when given an API host or token, which we never supply, so they
+# cannot switch on via an image bump the way a boolean default can. Adding
+# inert variables for them would be config that looks load-bearing and is not.
+ENV NEXT_PUBLIC_AD_BANNER_PROVIDER=${BAKE_PROD_ENV:+none} \
+    NEXT_PUBLIC_AD_TEXT_PROVIDER=${BAKE_PROD_ENV:+none} \
+    NEXT_PUBLIC_GAS_TRACKER_ENABLED=${BAKE_PROD_ENV:+false} \
+    NEXT_PUBLIC_MARKETPLACE_ENABLED=${BAKE_PROD_ENV:+false}
+
 # No CMD/ENTRYPOINT override: the base image's ./entrypoint.sh is what injects
 # the above into the client bundle at start, and `node server.js` follows it.

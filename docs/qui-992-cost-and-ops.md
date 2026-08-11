@@ -149,6 +149,39 @@ it does. Disabling those would not be conservative — it would make the explore
 
 `TRACE_FIRST_BLOCK` is likewise not set: it only bounds internal-transaction indexing, which is off.
 
+### Which frontend features are enabled
+
+The Blockscout frontend ships a large catalogue of optional integrations — ads, the DappScout
+marketplace, Merits/rewards, analytics, chain-specific widgets. It prints an enabled/disabled
+checklist at container boot, which is the authoritative audit: run the image and read it.
+
+An unconfigured image reports **6 of 50 enabled**. Ours reports **3**:
+
+| | Enabled |
+|---|---|
+| unconfigured upstream | Advanced filter, **Banner ads**, **Text ads**, API documentation, **Gas tracker**, Web3 wallet integration |
+| this image | Advanced filter, API documentation, Web3 wallet integration |
+
+**Ads are on by default** — upstream's docs state "ads are enabled by default on all self-hosted
+instances." Left alone, a Quip-branded explorer would serve third-party crypto advertising and load
+an ad network's scripts into every visitor's browser. Both are set to `none`.
+
+The **gas tracker** is off because `/api/v2/stats` returns null for every gas price on this chain;
+the widget renders empty and reads as broken. The **marketplace (DappScout)** was already off, but is
+pinned explicitly — it is off only by *default*, and this is a floating upstream image, so a base
+bump could flip it on.
+
+Kept on deliberately: **API documentation** (directly useful for the dev-onboarding half of QUI-905)
+and **Web3 wallet integration**, which provides "add Quip Testnet to MetaMask" — arguably the single
+most useful button on a testnet explorer.
+
+**Merits/rewards, Mixpanel, GrowthBook and Google Analytics are not set at all.** They activate only
+when given an API host or token, which we never supply, so unlike a boolean default they cannot
+switch on via an image bump. Adding inert variables to "disable" them would be config that looks
+load-bearing and is not.
+
+Re-run the audit after any base-image bump: `docker run --rm <ui-image>` and read the checklist.
+
 ---
 
 ## 4. Cost
