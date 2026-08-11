@@ -300,7 +300,42 @@ the explorer shows full history. Neither is a fault.
 
 ---
 
-## 7. Known risks and accepted trade-offs
+## 7. End-to-end proof
+
+Block indexing was verified by hash comparison, but the transaction, address and log paths could not
+be — this chain's EVM had **never had a transaction**. `eth_getLogs` across all ~109k blocks of EVM
+history returned zero logs, and every sampled block had `gasUsed: 0x0`.
+
+So one was created. `scripts/send-test-transaction.mjs` funds a throwaway key from the faucet and
+sends a single self-transfer:
+
+```
+tx      0x668389bc1dea63f714b798ab7a1fd5bb4685ef1c33e1fd8a4b04c176d5d3b693
+block   1,095,350          status success, gasUsed 1,994,981
+```
+
+That is the **first EVM transaction in the chain's history** (2026-08-11).
+
+The one Quip-specific step is funding. An Ethereum address is not itself an account on this chain:
+the runtime uses `pallet_revive::AccountId32Mapper`, whose fallback derivation for an unmapped H160
+is the 20 address bytes followed by twelve `0xEE` bytes. The faucet must be given *that* 32-byte
+value — `POST /request {"dest": "0x<64 hex>", "amount": <plancks>}`. Sending to the H160 itself goes
+nowhere. Amounts are in plancks (12 native decimals); balances over `eth_*` are in wei (18), bridged
+by `ReviveNativeToEthRatio = 1_000_000`.
+
+The explorer indexed it correctly:
+
+| Page | Result |
+|---|---|
+| `/tx/<hash>` | status `ok`, block 1095350, gas 1,994,981, value 0.01, correct from/to |
+| `/address/<addr>` | balance `9997005019000000000` wei — the funded amount minus gas |
+| `/address/<addr>/transactions` | 1 transaction listed |
+
+One caveat: `/api/v2/stats` still reports `total_transactions: 0` immediately afterwards. Those are
+cached aggregate counters that Blockscout recomputes on a schedule; the per-transaction and
+per-address pages are correct. Do not read the homepage tiles as a liveness check.
+
+## 8. Known risks and accepted trade-offs
 
 - **Raw-Docker FDM auto-TLS is documented but unrehearsed by us.** We have proven it on Orbit apps
   (`portal.testnet`, `asset-tracker`), never on a raw-Docker multi-component app. If issuance fails,
