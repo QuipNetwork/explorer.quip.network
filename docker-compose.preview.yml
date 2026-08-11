@@ -1,0 +1,97 @@
+# QUI-992 preview — run EXACTLY what gets deployed, locally.
+#
+# This is not the rehearsal harness. docker-compose.rehearsal.yml runs UPSTREAM
+# images with config supplied inline, to measure resource usage. This file runs
+# OUR THREE BUILT IMAGES, wired the way Flux wires them, so what you see in the
+# browser is the artifact that ships:
+#
+#   - the real bsapi / bsui / bsproxy images, with their baked config
+#   - the same single-origin proxy routing (UI at /, API at /api, /socket, ...)
+#   - so the ad lockdown, the disabled fetchers and the GraphQL block are all
+#     live and inspectable rather than taken on trust
+#
+# ONE thing is deliberately different, and it is the only thing:
+# the images bake explorer.testnet.quip.network as the browser-facing host,
+# because that is what FDM will serve. Locally that name does not resolve to
+# this stack, so the frontend's API/APP host is overridden to localhost. This
+# also demonstrates the bake staying runtime-overridable — the same property
+# that lets the Flux spec override anything baked.
+#
+# Data: starts from an empty database. The realtime fetcher reaches head within
+# about a minute, so the explorer is populated almost immediately; the ~109k
+# blocks of history backfill behind it over roughly two hours. You do not need
+# to wait for that to judge the UI.
+#
+# Usage: scripts/preview.sh up | down
+name: quip-explorer-preview
+
+services:
+  bsdb:
+    image: postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    container_name: qep-bsdb
+    restart: on-failure:5
+    environment:
+      POSTGRES_USER: blockscout
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set by scripts/preview.sh}
+      POSTGRES_DB: blockscout
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - bsdb-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U blockscout -d blockscout]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  bsapi:
+    image: quip-explorer-api:local
+    container_name: qep-bsapi
+    restart: on-failure:5
+    depends_on:
+      bsdb:
+        condition: service_healthy
+    environment:
+      # The only two values the Flux spec supplies. Everything else is baked.
+      DATABASE_URL: postgresql://blockscout:${POSTGRES_PASSWORD:?}@bsdb:5432/blockscout?ssl=false
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set by scripts/preview.sh}
+      # Links the backend generates should point at the local origin, not prod.
+      API_URL: http://localhost:${PREVIEW_PORT:-20050}
+      WEBAPP_URL: http://localhost:${PREVIEW_PORT:-20050}
+
+  bsui:
+    image: quip-explorer-ui:local
+    container_name: qep-bsui
+    restart: on-failure:5
+    depends_on:
+      bsapi:
+        condition: service_started
+    environment:
+      # The one deliberate deviation from the deployed image: point the browser
+      # at this stack instead of at explorer.testnet.quip.network.
+      NEXT_PUBLIC_API_PROTOCOL: http
+      NEXT_PUBLIC_API_HOST: localhost
+      NEXT_PUBLIC_API_PORT: "${PREVIEW_PORT:-20050}"
+      NEXT_PUBLIC_APP_PROTOCOL: http
+      NEXT_PUBLIC_APP_HOST: localhost
+      NEXT_PUBLIC_APP_PORT: "${PREVIEW_PORT:-20050}"
+      NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL: ws
+
+  bsproxy:
+    image: quip-explorer-proxy:local
+    container_name: qep-bsproxy
+    restart: on-failure:5
+    depends_on:
+      bsui:
+        condition: service_started
+    environment:
+      # Sibling names differ from Flux's flux<component>_<app> scheme, which is
+      # exactly why the proxy takes them as env rather than hardcoding them.
+      PROXY_PORT: "20050"
+      BSAPI_UPSTREAM: bsapi:4000
+      BSUI_UPSTREAM: bsui:3000
+    ports:
+      - "${PREVIEW_PORT:-20050}:20050"
+
+volumes:
+  bsdb-data:

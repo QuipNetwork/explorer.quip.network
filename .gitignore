@@ -9,3 +9,6 @@ rehearsal/*.log
 
 # Claude/superpowers working docs — local-only, never committed
 docs/superpowers/
+
+# Generated preview secrets (throwaway, gitignored)
+.env.preview
