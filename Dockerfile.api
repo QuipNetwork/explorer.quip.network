@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Blockscout backend (indexer + API) for the Quip testnet, QUI-992.
+#
+# This image exists for one reason: Flux hard-caps each app component at 20
+# environment variables, and Blockscout needs far more than 20. So every
+# non-secret constant is baked here and only the two real secrets
+# (SECRET_KEY_BASE, and the password inside DATABASE_URL) are left for the Flux
+# app spec to supply. Same trick, same reason as
+# bootnodes.quip.network/deploy/flux/Dockerfile.flux's BAKE_EVMRPC_ENV.
+#
+# The ${BAKE_PROD_ENV:+...} idiom emits each constant only when the build-arg is
+# non-empty. Building WITHOUT the arg produces a neutral image with every value
+# unset, which is what lets the rehearsal harness and any future test reuse this
+# same Dockerfile without inheriting production constants. Docker ENV stays
+# overridable at runtime, so the Flux spec still wins over anything baked.
+#
+# Build:
+#   docker build -f Dockerfile.api --build-arg BAKE_PROD_ENV=1 -t <registry>:api-<sha> .
+FROM ghcr.io/blockscout/blockscout:9.0.2
+
+ARG BAKE_PROD_ENV=
+
+# ── Chain identity and the RPC it indexes ───────────────────────────────────
+#
+# ETHEREUM_JSONRPC_VARIANT=anvil is the ACCURATE setting, not a workaround.
+# Probed against the live endpoint 2026-08-11: trace_block returns
+# "Method not found" and debug_traceBlockByNumber returns []. The pallet-revive
+# sidecar serves eth_* only, so internal transactions and block rewards are
+# genuinely unavailable and the two fetchers below are switched off to match.
+# Leaving them on produces an endlessly retrying fetcher, not more data.
+#
+# FIRST_BLOCK is LOAD-BEARING. eth_getBlockByNumber returns null for every block
+# below 985,665 (binary-searched 2026-08-11: 985,665 resolves, 985,664 is null) —
+# that is where the EVM went live on this chain. Blockscout's catchup fetcher
+# defaults to block 0, so without this it walks ~985k blocks that can never
+# resolve and never reaches a complete index.
+# There is deliberately NO ETHEREUM_JSONRPC_WS_URL here.
+#
+# The endpoint's WebSocket works — it upgrades (101) and carries JSON-RPC — but
+# it has no PUBSUB: eth_subscribe returns "Method not found", matching the
+# bootnodes README's note that eth-rpc ships neither a filter API nor pubsub.
+# Blockscout treats a new-heads subscription as optional and polls
+# eth_blockNumber instead, so setting a WS URL here would advertise a capability
+# that does not exist.
+#
+# Verified rather than assumed (QUI-992 rehearsal, 2026-08-11): the backend was
+# recreated with the variable FULLY unset (0 occurrences in the container env)
+# and the realtime fetcher stayed 0-1 blocks behind head across four minutes,
+# with zero websocket errors logged — identical to running with it set.
+ENV ETHEREUM_JSONRPC_VARIANT=${BAKE_PROD_ENV:+anvil} \
+    ETHEREUM_JSONRPC_HTTP_URL=${BAKE_PROD_ENV:+https://evm-rpc.testnet.quip.network:20049/} \
+    CHAIN_ID=${BAKE_PROD_ENV:+20033} \
+    FIRST_BLOCK=${BAKE_PROD_ENV:+985665} \
+    TRACE_FIRST_BLOCK=${BAKE_PROD_ENV:+985665} \
+    INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER=${BAKE_PROD_ENV:+true} \
+    INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER=${BAKE_PROD_ENV:+true}
+
+# ── Indexer pacing ──────────────────────────────────────────────────────────
+#
+# Upstream defaults are 10 x 10 = 100 blocks in flight (config/runtime.exs).
+# evm-rpc.testnet is a SINGLE Flux instance with no rate limit configured, no
+# redundancy, and live BD consumers, so we index at 4 x 10 = 40 instead.
+# Measured in the QUI-992 rehearsal: ~24 blocks/s sustained, with the RPC still
+# answering eth_blockNumber in ~0.56s throughout. Raising these is a decision
+# about someone else's endpoint, not a free knob.
+ENV INDEXER_CATCHUP_BLOCKS_CONCURRENCY=${BAKE_PROD_ENV:+4} \
+    INDEXER_CATCHUP_BLOCKS_BATCH_SIZE=${BAKE_PROD_ENV:+10}
+
+# ── Presentation and app URLs ───────────────────────────────────────────────
+#
+# AGLS has no CoinGecko listing; DISABLE_EXCHANGE_RATES stops a steady stream of
+# failed price lookups that would otherwise be the loudest thing in the log.
+# SUBNETWORK must be set explicitly — its default is the long-dead "POA Sokol".
+ENV COIN=${BAKE_PROD_ENV:+AGLS} \
+    COIN_NAME=${BAKE_PROD_ENV:+Aglais} \
+    NETWORK=${BAKE_PROD_ENV:+Quip} \
+    SUBNETWORK="${BAKE_PROD_ENV:+Quip Testnet}" \
+    DISABLE_EXCHANGE_RATES=${BAKE_PROD_ENV:+true} \
+    API_URL=${BAKE_PROD_ENV:+https://explorer.testnet.quip.network} \
+    WEBAPP_URL=${BAKE_PROD_ENV:+https://explorer.testnet.quip.network} \
+    PORT=${BAKE_PROD_ENV:+4000}
+
+# ECTO_USE_SSL defaults to TRUE upstream. bsdb is a sibling component on the
+# app-private Docker network with no TLS, so leaving the default would fail
+# every connection at startup.
+ENV ECTO_USE_SSL=${BAKE_PROD_ENV:+false}
+
+# NOT baked, supplied by the Flux app spec — these are the only two secrets:
+#   SECRET_KEY_BASE   64 bytes, generated fresh per deployment
+#   DATABASE_URL      postgresql://blockscout:<pw>@fluxbsdb_quipexplorer:5432/blockscout?ssl=false
+
+COPY --chown=blockscout:blockscout entrypoint-api.sh /app/entrypoint-api.sh
+
+# The base image has NO ENTRYPOINT and its CMD is a bare /bin/sh, so Blockscout
+# must be started explicitly. Baking it here rather than putting it in the Flux
+# spec's `commands` keeps the spec small and avoids the "commands is Docker Cmd,
+# not Entrypoint" trap that bites images which DO carry an entrypoint.
+ENTRYPOINT ["/app/entrypoint-api.sh"]

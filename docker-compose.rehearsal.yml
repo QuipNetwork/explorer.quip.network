@@ -1,0 +1,132 @@
+# QUI-992 rehearsal harness — Blockscout against the LIVE testnet EVM endpoint.
+#
+# This is the measurement step, not a deployable artifact. It exists to replace
+# the guesses in the QUI-992 resource table with numbers: how long the backfill
+# actually takes, how much RSS the backend and Postgres actually peak at, and how
+# big Postgres actually gets at head. Upstream Blockscout publishes 16 core /
+# 128 GB / 4 TB figures that are sized for Ethereum mainnet and tell us nothing
+# about a chain whose EVM history starts at block 985,665.
+#
+# Differences from Roman's !65 compose (docker-compose.evm-explorer.yml in
+# quip-validator), and why:
+#
+#   - No `eth-rpc` service and no native node. !65 builds a --dev chain from
+#     source; we point at the already-deployed QUI-966 sidecar at
+#     evm-rpc.testnet.quip.network:20049. That endpoint is the AC #2 requirement
+#     ("no second adapter"), and it is already archive-complete: the node runs
+#     --state-pruning=archive --blocks-pruning=archive and the sidecar
+#     deliberately omits --eth-pruning.
+#   - CHAIN_ID 20033 (0x4e41), not 1337. 1337 is the dev-chain-id feature build;
+#     20033 is ReviveChainId on the real testnet runtime.
+#   - FIRST_BLOCK is set and is MANDATORY. eth_getBlockByNumber returns null for
+#     every block below 985,665 (verified by binary search 2026-08-11: 985,665
+#     resolves, 985,664 is null). Blockscout's catchup fetcher defaults to block
+#     0, so without this it would grind on ~985k dead requests forever.
+#   - Service names match the Flux component names (bsdb/bsapi/bsui) so the
+#     rehearsal and the deployed app stay legible against each other.
+#
+# The `anvil` variant is inherited from !65 and the probes confirm why it is the
+# accurate setting rather than a workaround: trace_block returns "Method not
+# found" and debug_traceBlockByNumber returns [] on this sidecar, so internal
+# transactions and block rewards are genuinely unavailable.
+#
+# Usage: scripts/rehearse.sh  (do not `docker compose up` directly — the script
+# generates SECRET_KEY_BASE and starts the sampler).
+name: quip-explorer-rehearsal
+
+services:
+  bsdb:
+    image: postgres:17-alpine
+    container_name: qer-bsdb
+    restart: on-failure:5
+    environment:
+      POSTGRES_USER: blockscout
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set by scripts/rehearse.sh}
+      POSTGRES_DB: blockscout
+    # max_connections: Blockscout opens a large pool (API pool + indexer pool);
+    # the postgres default of 100 is tight enough to surface as intermittent
+    # "too many clients" during catchup. Upstream's own compose raises it too.
+    command: postgres -c max_connections=200
+    volumes:
+      - bsdb-data:/var/lib/postgresql/data
+    # Published so the sampler can query pg_database_size and block counts from
+    # the host without docker exec on every tick. Rehearsal only — the deployed
+    # bsdb component publishes NO ports.
+    ports:
+      - "${REHEARSAL_PG_PORT:-7433}:5432"
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U blockscout -d blockscout]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  bsapi:
+    image: ghcr.io/blockscout/blockscout:9.0.2
+    container_name: qer-bsapi
+    restart: on-failure:5
+    depends_on:
+      bsdb:
+        condition: service_healthy
+    # The image's default CMD is a bare /bin/sh; Blockscout must be started
+    # explicitly, running migrations first. Carried over from !65.
+    command: sh -c "bin/blockscout eval 'Elixir.Explorer.ReleaseTasks.create_and_migrate()' && bin/blockscout start"
+    environment:
+      ETHEREUM_JSONRPC_VARIANT: anvil
+      ETHEREUM_JSONRPC_HTTP_URL: ${QUIP_EVM_RPC_HTTP:-https://evm-rpc.testnet.quip.network:20049/}
+      ETHEREUM_JSONRPC_WS_URL: ${QUIP_EVM_RPC_WS:-wss://evm-rpc.testnet.quip.network:20049/}
+      CHAIN_ID: "20033"
+      FIRST_BLOCK: "${QUIP_FIRST_BLOCK:-985665}"
+      TRACE_FIRST_BLOCK: "${QUIP_FIRST_BLOCK:-985665}"
+      INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER: "true"
+      INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER: "true"
+      # No CoinGecko listing for AGLS; leaving this on produces a steady stream
+      # of failed price lookups that muddies the log we are trying to read.
+      DISABLE_EXCHANGE_RATES: "true"
+      COIN: AGLS
+      COIN_NAME: Aglais
+      NETWORK: Quip
+      SUBNETWORK: Quip Testnet
+      DATABASE_URL: postgresql://blockscout:${POSTGRES_PASSWORD:?}@bsdb:5432/blockscout?ssl=false
+      ECTO_USE_SSL: "false"
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set by scripts/rehearse.sh}
+      PORT: "4000"
+      # Deliberately conservative for the first run. evm-rpc.testnet is a SINGLE
+      # Flux instance with no rate limit configured and no redundancy, and it is
+      # a live BD endpoint. 4 x 10 = 40 blocks in flight is a polite opening bid;
+      # raise it in .env once the RPC is observed to shrug this off.
+      INDEXER_CATCHUP_BLOCKS_CONCURRENCY: "${QUIP_CATCHUP_CONCURRENCY:-4}"
+      INDEXER_CATCHUP_BLOCKS_BATCH_SIZE: "${QUIP_CATCHUP_BATCH_SIZE:-10}"
+      API_URL: http://localhost:${REHEARSAL_API_PORT:-4000}
+      WEBAPP_URL: http://localhost:${REHEARSAL_UI_PORT:-3000}
+    ports:
+      - "${REHEARSAL_API_PORT:-4000}:4000"
+
+  bsui:
+    image: ghcr.io/blockscout/frontend:v2.3.5
+    container_name: qer-bsui
+    restart: on-failure:5
+    depends_on:
+      bsapi:
+        condition: service_started
+    environment:
+      NEXT_PUBLIC_API_PROTOCOL: http
+      NEXT_PUBLIC_API_HOST: localhost
+      NEXT_PUBLIC_API_PORT: "${REHEARSAL_API_PORT:-4000}"
+      NEXT_PUBLIC_APP_PROTOCOL: http
+      NEXT_PUBLIC_APP_HOST: localhost
+      NEXT_PUBLIC_APP_PORT: "${REHEARSAL_UI_PORT:-3000}"
+      NEXT_PUBLIC_NETWORK_NAME: Quip Testnet
+      NEXT_PUBLIC_NETWORK_SHORT_NAME: Quip
+      NEXT_PUBLIC_NETWORK_ID: "20033"
+      NEXT_PUBLIC_NETWORK_CURRENCY_NAME: Aglais
+      NEXT_PUBLIC_NETWORK_CURRENCY_SYMBOL: AGLS
+      # 12 native decimals map to 18 EVM decimals via ReviveNativeToEthRatio
+      # (1_000_000, runtime/src/configs/mod.rs:232). Carried over from !65.
+      NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS: "18"
+      NEXT_PUBLIC_NETWORK_RPC_URL: ${QUIP_EVM_RPC_HTTP:-https://evm-rpc.testnet.quip.network:20049/}
+    ports:
+      - "${REHEARSAL_UI_PORT:-3000}:3000"
+
+volumes:
+  bsdb-data:

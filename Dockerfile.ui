@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Blockscout frontend for the Quip testnet, QUI-992.
+#
+# Same rationale as Dockerfile.api: Flux caps each component at 20 environment
+# variables and the Blockscout frontend needs more, so the constants are baked.
+# Unlike the backend this image has NO secrets at all — every NEXT_PUBLIC_* here
+# is by definition shipped to the browser — so the Flux spec supplies nothing
+# and this component's env list is empty.
+#
+# The base image's ENTRYPOINT (./entrypoint.sh) is what reads these at container
+# start and writes them into the client bundle, so they must be real ENV at
+# runtime rather than build-time ARGs, and the entrypoint must NOT be overridden.
+#
+# Build:
+#   docker build -f Dockerfile.ui --build-arg BAKE_PROD_ENV=1 -t <registry>:ui-<sha> .
+FROM ghcr.io/blockscout/frontend:v2.3.5
+
+ARG BAKE_PROD_ENV=
+
+# ── Where the browser finds the API and the app ─────────────────────────────
+#
+# Both are the SAME public origin: nginx (the bsproxy component) serves the
+# frontend at / and routes /api, /socket, /sitemap.xml and the auth paths to the
+# backend. So there is no NEXT_PUBLIC_API_PORT here — the API is same-origin on
+# 443, and setting a port would make the browser call an address that FDM does
+# not publish.
+#
+# The protocols are https/wss even though nginx itself listens on plain HTTP,
+# because these describe what the BROWSER connects to. FDM terminates TLS in
+# front of us; the cleartext hop is between FDM and nginx and is invisible here.
+ENV NEXT_PUBLIC_API_PROTOCOL=${BAKE_PROD_ENV:+https} \
+    NEXT_PUBLIC_API_HOST=${BAKE_PROD_ENV:+explorer.testnet.quip.network} \
+    NEXT_PUBLIC_API_BASE_PATH=${BAKE_PROD_ENV:+/} \
+    NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL=${BAKE_PROD_ENV:+wss} \
+    NEXT_PUBLIC_APP_PROTOCOL=${BAKE_PROD_ENV:+https} \
+    NEXT_PUBLIC_APP_HOST=${BAKE_PROD_ENV:+explorer.testnet.quip.network}
+
+# ── Chain identity as presented to users ────────────────────────────────────
+#
+# CURRENCY_DECIMALS is 18, not the chain's native 12. pallet-revive bridges the
+# two with ReviveNativeToEthRatio = 1_000_000 (runtime/src/configs/mod.rs:232),
+# so balances arriving over eth_* are already in 18-decimal units. Setting 12
+# here would render every balance a million times too large.
+ENV NEXT_PUBLIC_NETWORK_NAME="${BAKE_PROD_ENV:+Quip Testnet}" \
+    NEXT_PUBLIC_NETWORK_SHORT_NAME=${BAKE_PROD_ENV:+Quip} \
+    NEXT_PUBLIC_NETWORK_ID=${BAKE_PROD_ENV:+20033} \
+    NEXT_PUBLIC_NETWORK_CURRENCY_NAME=${BAKE_PROD_ENV:+Aglais} \
+    NEXT_PUBLIC_NETWORK_CURRENCY_SYMBOL=${BAKE_PROD_ENV:+AGLS} \
+    NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS=${BAKE_PROD_ENV:+18} \
+    NEXT_PUBLIC_NETWORK_RPC_URL=${BAKE_PROD_ENV:+https://evm-rpc.testnet.quip.network:20049/}
+
+# No CMD/ENTRYPOINT override: the base image's ./entrypoint.sh is what injects
+# the above into the client bundle at start, and `node server.js` follows it.
