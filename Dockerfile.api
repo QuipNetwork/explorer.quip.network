@@ -51,10 +51,61 @@ ARG BAKE_PROD_ENV=
 ENV ETHEREUM_JSONRPC_VARIANT=${BAKE_PROD_ENV:+anvil} \
     ETHEREUM_JSONRPC_HTTP_URL=${BAKE_PROD_ENV:+https://evm-rpc.testnet.quip.network:20049/} \
     CHAIN_ID=${BAKE_PROD_ENV:+20033} \
-    FIRST_BLOCK=${BAKE_PROD_ENV:+985665} \
-    TRACE_FIRST_BLOCK=${BAKE_PROD_ENV:+985665} \
-    INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER=${BAKE_PROD_ENV:+true} \
-    INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER=${BAKE_PROD_ENV:+true}
+    FIRST_BLOCK=${BAKE_PROD_ENV:+985665}
+
+# ── Fetchers switched OFF ───────────────────────────────────────────────────
+#
+# Blockscout enables roughly two dozen fetchers by default. The four below are
+# disabled because on THIS chain and THIS endpoint they cannot succeed or
+# cannot find anything — not merely because they are unused today.
+#
+#   internal transactions / block rewards
+#     Both derive from tracing. The sidecar has none: trace_block returns
+#     "Method not found" and debug_traceBlockByNumber returns []. Left enabled
+#     they retry forever against an endpoint that can never answer.
+#
+#   pending transactions
+#     Carried over from !65. Nothing depends on a mempool view here.
+#
+#   empty blocks sanitizer
+#     This one matters most. It re-fetches blocks it believes are empty to
+#     confirm they really are. On Quip testnet essentially EVERY block is empty,
+#     so it re-queries the entire chain forever, at batch 10 every 10s, against
+#     evm-rpc.testnet — a single Flux instance with no redundancy that also
+#     serves BD traffic. Measured running continuously before being disabled;
+#     silencing it left the indexing rate unchanged at ~21 blocks/s.
+#
+# Deliberately NOT disabled: the token, NFT/token-instance and coin/token
+# balance fetchers. They are idle today only because the chain has no activity
+# yet, and they are exactly what must work the moment it does. Disabling those
+# would not be conservative — it would make the explorer quietly wrong later.
+#
+# There is no TRACE_FIRST_BLOCK here: it only bounds internal-transaction
+# indexing, which is off, so setting it would be inert config.
+ENV INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER=${BAKE_PROD_ENV:+true} \
+    INDEXER_DISABLE_BLOCK_REWARD_FETCHER=${BAKE_PROD_ENV:+true} \
+    INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER=${BAKE_PROD_ENV:+true} \
+    INDEXER_DISABLE_EMPTY_BLOCKS_SANITIZER=${BAKE_PROD_ENV:+true}
+
+# ── Database connection pool ────────────────────────────────────────────────
+#
+# Blockscout's DEFAULT pools open ~100 Postgres connections and hold them idle:
+# measured during a catchup, 100 connections of which only 1-2 were ever
+# 'active'. Postgres defaults to max_connections=100, so out of the box
+# Blockscout consumes the ENTIRE connection budget and everything else — psql,
+# a monitoring probe, the migration task — fails with "sorry, too many clients
+# already". That is a real failure Roman hit locally, not a theoretical one.
+#
+# The tempting fix is to raise max_connections on the server. That treats the
+# symptom: those connections are not being used. Capping the pools instead is
+# both more conservative and materially cheaper — measured, capping to 20+10
+# took connections 100 -> 31 and Postgres RSS 469 MiB -> 143 MiB with NO
+# reduction in indexing rate (active connections never exceeded 2 either way).
+#
+# With 31 connections against Postgres's default 100 there is ~70 slots of
+# headroom, so bsdb needs no max_connections override at all.
+ENV POOL_SIZE=${BAKE_PROD_ENV:+20} \
+    POOL_SIZE_API=${BAKE_PROD_ENV:+10}
 
 # ── Indexer pacing ──────────────────────────────────────────────────────────
 #

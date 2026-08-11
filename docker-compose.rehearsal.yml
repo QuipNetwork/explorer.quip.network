@@ -43,10 +43,11 @@ services:
       POSTGRES_USER: blockscout
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set by scripts/rehearse.sh}
       POSTGRES_DB: blockscout
-    # max_connections: Blockscout opens a large pool (API pool + indexer pool);
-    # the postgres default of 100 is tight enough to surface as intermittent
-    # "too many clients" during catchup. Upstream's own compose raises it too.
-    command: postgres -c max_connections=200
+    # No max_connections override. Blockscout's DEFAULT pools open ~100
+    # connections and hold them idle, which consumes Postgres's entire default
+    # budget and produces "sorry, too many clients already" for everything else.
+    # That is fixed on the CLIENT side instead (POOL_SIZE below), which takes
+    # the count to 31 — comfortably inside the default 100.
     volumes:
       - bsdb-data:/var/lib/postgresql/data
     # Published so the sampler can query pg_database_size and block counts from
@@ -74,12 +75,21 @@ services:
     environment:
       ETHEREUM_JSONRPC_VARIANT: anvil
       ETHEREUM_JSONRPC_HTTP_URL: ${QUIP_EVM_RPC_HTTP:-https://evm-rpc.testnet.quip.network:20049/}
-      ETHEREUM_JSONRPC_WS_URL: ${QUIP_EVM_RPC_WS:-wss://evm-rpc.testnet.quip.network:20049/}
+      # No ETHEREUM_JSONRPC_WS_URL: the endpoint's WebSocket carries JSON-RPC but
+      # has no pubsub (eth_subscribe -> Method not found), so Blockscout polls
+      # eth_blockNumber instead. Verified: with it fully unset the realtime
+      # fetcher still held 0-1 blocks behind head.
       CHAIN_ID: "20033"
       FIRST_BLOCK: "${QUIP_FIRST_BLOCK:-985665}"
-      TRACE_FIRST_BLOCK: "${QUIP_FIRST_BLOCK:-985665}"
       INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER: "true"
+      INDEXER_DISABLE_BLOCK_REWARD_FETCHER: "true"
       INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER: "true"
+      # Every block on this chain is empty, so the sanitizer would re-query the
+      # whole chain forever against a single-instance production endpoint.
+      INDEXER_DISABLE_EMPTY_BLOCKS_SANITIZER: "true"
+      # Defaults open ~100 idle connections for 1-2 active ones. See Dockerfile.api.
+      POOL_SIZE: "${QUIP_POOL_SIZE:-20}"
+      POOL_SIZE_API: "${QUIP_POOL_SIZE_API:-10}"
       # No CoinGecko listing for AGLS; leaving this on produces a steady stream
       # of failed price lookups that muddies the log we are trying to read.
       DISABLE_EXCHANGE_RATES: "true"

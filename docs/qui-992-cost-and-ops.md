@@ -111,6 +111,44 @@ logs from that window were discarded by a later recreate.
 after any edit, because `verifyappupdatespecifications` is blind on enterprise apps and the dashboard
 only reports a failure after the whole wizard is filled in.
 
+### Connection pool — why `max_connections` is *not* overridden
+
+Blockscout's default pools open **~100 Postgres connections and hold them idle**; measured during a
+catchup, only **1–2 were ever `active`**. Postgres defaults to `max_connections=100`, so out of the
+box Blockscout consumes the entire connection budget and everything else — `psql`, a monitoring
+probe, the migration task — fails with *"sorry, too many clients already"*. This is a real failure,
+reported independently from a local run, and it reproduces exactly.
+
+The obvious fix is to raise `max_connections` on the server. That treats the symptom; the connections
+are not being used. Capping the client pools is both more conservative and materially cheaper:
+
+| | connections | Postgres RSS | indexing rate |
+|---|---|---|---|
+| defaults | 100 | 469 MiB | ~22 blocks/s |
+| `POOL_SIZE=20`, `POOL_SIZE_API=10` | **31** | **~150 MiB** | ~21 blocks/s |
+
+So the pools are capped in the image and `bsdb` runs with **no `commands` override at all** — 31
+connections sits comfortably inside Postgres's default 100. The ~325 MiB saved is why the `bsdb`
+allocation keeps a wide margin at 1500 MB.
+
+### Which fetchers are enabled
+
+Blockscout ships roughly two dozen fetchers enabled by default. Four are switched off, and the
+distinction is deliberate — **only things that cannot succeed here, or are provably wasted**:
+
+| Disabled | Why |
+|---|---|
+| internal transactions | derives from tracing; the sidecar has none |
+| block rewards | same — retries forever against an endpoint that cannot answer |
+| pending transactions | nothing here depends on a mempool view |
+| **empty blocks sanitizer** | re-fetches "empty" blocks to confirm them. On a chain where *every* block is empty it re-queries the whole chain forever, batch 10 every 10s, against a single-instance production endpoint. Observed running continuously; disabling it left the rate unchanged at ~21 blocks/s |
+
+**Deliberately left enabled:** the token, NFT/token-instance and coin/token balance fetchers. They are
+idle today only because the chain has no activity, and they are precisely what must work the moment
+it does. Disabling those would not be conservative — it would make the explorer quietly wrong later.
+
+`TRACE_FIRST_BLOCK` is likewise not set: it only bounds internal-transaction indexing, which is off.
+
 ---
 
 ## 4. Cost
