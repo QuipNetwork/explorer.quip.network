@@ -99,6 +99,10 @@
     "that API instead, which is exactly why the bootnodes keep their secrets in",
     "the encrypted `secrets` field.",
     "",
+    "This is required for the app's OWN two secrets and would be even if the",
+    "registry were private. Making the GitLab project public removed the",
+    "registry token from the spec; it did not remove the reason for encryption.",
+    "",
     "Impact if we ignore it: the Postgres password guards a component that",
     "publishes no port, so it is only reachable from inside the app's own",
     "network — low value, but not nothing on a shared host. SECRET_KEY_BASE",
@@ -121,7 +125,10 @@
     "     quipexplorer.app.runonflux.io and confirm it resolves to fdm-lb-*",
     "     BEFORE applying the Custom Domain. Applying first pushes FDM's ACME",
     "     into backoff.",
-    "  3. Mint a GitLab deploy token with read_registry for repoauth.",
+    "  3. Nothing to mint: the GitLab project is PUBLIC, so its registry is",
+    "     anonymously pullable and `repoauth` stays EMPTY on every component.",
+    "     Do NOT put a placeholder there — Flux sends it verbatim and the",
+    "     registry answers 401 rather than falling back to anonymous.",
     "  4. Generate a fresh SECRET_KEY_BASE (openssl rand -hex 64). Do NOT reuse",
     "     the rehearsal value or the dev literal from !65.",
     "",
@@ -171,7 +178,7 @@
       "cpu": 1.25,
       "ram": 2000,
       "hdd": 1,
-      "repoauth": "gitlab+deploy-token-<REPLACE>:<REPLACE>",
+      "repoauth": "",
       "secrets": ""
     },
     {
@@ -187,7 +194,7 @@
       "cpu": 0.5,
       "ram": 700,
       "hdd": 1,
-      "repoauth": "gitlab+deploy-token-<REPLACE>:<REPLACE>",
+      "repoauth": "",
       "secrets": ""
     },
     {
@@ -203,7 +210,7 @@
       "cpu": 0.25,
       "ram": 300,
       "hdd": 1,
-      "repoauth": "gitlab+deploy-token-<REPLACE>:<REPLACE>",
+      "repoauth": "",
       "secrets": ""
     }
   ],

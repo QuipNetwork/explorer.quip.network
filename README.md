@@ -114,9 +114,11 @@ Ordering matters in two places; both are called out.
    single-platform manifest whose printed digest *is* the image digest. It fails if an image was
    built without `BAKE_PROD_ENV=1`; a silently neutral image starts cleanly and indexes the wrong
    chain from block 0.
-2. Fill the spec: the three digests, a GitLab deploy token with `read_registry`, a fresh
-   `SECRET_KEY_BASE` (`openssl rand -hex 64`), and the Postgres password — which goes in **two**
-   places, `bsdb`'s env and `bsapi`'s `DATABASE_URL`. Re-run `scripts/validate-spec.py`.
+2. Fill the spec: the three digests, a fresh `SECRET_KEY_BASE` (`openssl rand -hex 64`), and the
+   Postgres password — which goes in **two** places, `bsdb`'s env and `bsapi`'s `DATABASE_URL`.
+   Re-run `scripts/validate-spec.py`. `repoauth` stays **empty**: this project is public, so its
+   registry is anonymously pullable, and a placeholder credential would be sent verbatim and answered
+   with a 401 rather than falling back to anonymous.
 3. **⚠ Create the DNS record FIRST.** DNSimple CNAME `explorer.testnet.quip.network` →
    `quipexplorer.app.runonflux.io`; confirm it resolves to `fdm-lb-*.runonflux.io` before touching
    the dashboard. This is a hand-created CNAME, *not* a `flux-dns-controller` tenant.
@@ -128,8 +130,9 @@ Ordering matters in two places; both are called out.
 
 **The app must be enterprise/encrypted.** A non-enterprise app's `compose` is readable from Flux's
 public API, and `environmentParameters` is part of it — deploying otherwise publishes
-`SECRET_KEY_BASE`, the Postgres password and the registry deploy token. Enterprise adds ~$0.80/month.
-Decide before subscribing; switching later means a new subscription.
+`SECRET_KEY_BASE` and the Postgres password. This is about the app's own secrets and would be
+required even with a private registry. Enterprise adds ~$0.80/month. Decide before subscribing;
+switching later means a new subscription.
 
 Expect the first boot to look unhealthy for a while: `bsapi` retries its migration until `bsdb`
 accepts connections (Flux has no cross-component ordering primitive, so the entrypoint retries the
@@ -162,10 +165,10 @@ Cert renewal is **FDM's**, on a ~90-day Let's Encrypt cycle. There is no dnsimpl
 `flux-dns-controller` registry entry, no capability token and no Tarsnap cert seeding — the entire
 bring-up ceremony the bootnodes, `evm-rpc`, `status` and `check` each carry. Nothing to run.
 
-Known limits: raw-Docker FDM auto-TLS is documented but unrehearsed by us (proven only on Orbit
-apps); the origin port serves cleartext on the public instance IP; availability is bounded by
-`evm-rpc`'s single instance and its ~1 month of disk runway (QUI-954/955); and EIP-155 chain ID 20033
-is unregistered on chainlist.
+Known limits: raw-Docker FDM auto-TLS is documented but unrehearsed here (proven only on Orbit apps);
+the origin port serves cleartext behind FDM, which terminates TLS and re-originates in the clear; the
+explorer's availability is bounded by the upstream RPC endpoint, which is currently a single
+instance; and EIP-155 chain ID 20033 is not registered on chainlist.
 
 ## License
 
