@@ -182,6 +182,43 @@ load-bearing and is not.
 
 Re-run the audit after any base-image bump: `docker run --rm <ui-image>` and read the checklist.
 
+### Backend HTTP surface, and GraphQL
+
+What the public origin actually exposes, measured through the proxy with the real frontend behind it:
+
+| Path | Reachable | Note |
+|---|---|---|
+| `/api/v2/*` | yes | required by the frontend |
+| `/api?module=…` | yes | Etherscan-compatible, read-only — the `proxy` module is absent, so there is **no** `eth_sendRawTransaction` route and no transaction-submission surface |
+| `/api-docs`, `/sitemap.xml`, `/socket` | yes | intended |
+| `/metrics` | **no (404)** | contained by the single-origin routing — it does not match the backend regex, so it lands on the frontend. The backend does serve it on its own port, which Flux never publishes |
+| `/admin`, account endpoints | no (404) | not enabled |
+| CSV export | no (422) | reCAPTCHA-gated |
+| **`/api/v1/graphql`, `/graphiql`** | **no (404)** | blocked at the proxy — see below |
+
+**GraphQL is blocked in nginx, not in the app, and that distinction matters.** Blockscout 9.0.2
+exposes a fully introspectable GraphQL endpoint plus the interactive `/graphiql` playground, with no
+query-complexity bound — an open-ended cost surface on a public origin backed by a 0.75-cpu Postgres,
+with no consumer in this stack.
+
+The obvious control, `API_GRAPHQL_ENABLED=false`, **does not work on 9.0.2**. The variable exists in
+upstream `master` but is not wired up in this release (blockscout/blockscout#11845 is the request to
+add exactly it). This was caught by testing rather than trusting the name: with the variable baked
+false, schema introspection still returned a full `RootQueryType`.
+
+So enforcement lives in `nginx-explorer.conf.template` as two `^~` location blocks returning 404,
+which also cover sub-paths. Verified: introspection through the proxy returns nginx's 404 while
+`/api/v2`, `/api?module=`, `/api-docs`, `/sitemap.xml` and `/` all still serve. The backend continues
+to answer GraphQL on its own port — that port is simply never published by Flux.
+
+`API_GRAPHQL_ENABLED=false` is still set in the image as forward-defence, so that a future base bump
+to a release which honours it gets app-layer enforcement too rather than depending solely on a proxy
+rule surviving an edit.
+
+**Re-enabling GraphQL means both** removing the nginx block **and** setting
+`API_GRAPHQL_MAX_COMPLEXITY`. Turning it back on without a complexity bound restores the original
+open-ended surface.
+
 ---
 
 ## 4. Cost

@@ -137,6 +137,30 @@ ENV COIN=${BAKE_PROD_ENV:+AGLS} \
 # every connection at startup.
 ENV ECTO_USE_SSL=${BAKE_PROD_ENV:+false}
 
+# ── GraphQL ─────────────────────────────────────────────────────────────────
+#
+# ⚠ THIS VARIABLE DOES NOT WORK ON 9.0.2 AND IS NOT WHAT DISABLES GRAPHQL.
+#
+# API_GRAPHQL_ENABLED exists in upstream master (default "true") but is not
+# wired up in the 9.0.2 release — see blockscout/blockscout#11845, the request
+# to add exactly this control. Verified rather than assumed: with the variable
+# baked as false, schema introspection against /api/v1/graphql still returned
+# a full RootQueryType.
+#
+# GraphQL is therefore blocked at the PROXY, in nginx-explorer.conf.template,
+# which is a layer we own and can verify. See the rationale there.
+#
+# It is kept here as forward-defence: when the base image is bumped to a
+# release where the variable is honoured, the app layer will refuse GraphQL on
+# its own rather than depending solely on a proxy rule surviving an edit. That
+# makes it deliberately-inert-with-a-reason, not the accidental kind of inert
+# config this Dockerfile otherwise avoids.
+#
+# If GraphQL is ever wanted, re-enabling means BOTH removing the nginx block and
+# setting an API_GRAPHQL_MAX_COMPLEXITY bound — turning it back on without a
+# complexity limit just restores the original open-ended surface.
+ENV API_GRAPHQL_ENABLED=${BAKE_PROD_ENV:+false}
+
 # NOT baked, supplied by the Flux app spec — these are the only two secrets:
 #   SECRET_KEY_BASE   64 bytes, generated fresh per deployment
 #   DATABASE_URL      postgresql://blockscout:<pw>@fluxbsdb_quipexplorer:5432/blockscout?ssl=false
