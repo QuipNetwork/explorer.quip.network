@@ -112,7 +112,7 @@
     "Decide this BEFORE subscribing: switching later means a new subscription.",
     "",
     "── BEFORE DEPLOYING ────────────────────────────────────────────────────",
-    "  0. The GitLab project quip-infra/explorer.quip.network must EXIST. The",
+    "  0. The GitLab project quip.network/explorer.quip.network must EXIST. The",
     "     container registry lives under the project, so nothing can be pushed",
     "     until it does, and every step below depends on that push.",
     "  1. Build and push the three images: PUSH=1 scripts/build-images.sh",

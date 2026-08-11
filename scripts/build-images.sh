@@ -3,7 +3,7 @@
 #
 # Builds the three explorer images for Flux and prints the digests to paste into
 # the app spec. Mirrors the bootnodes.quip.network build discipline rather than
-# introducing CI: quip-infra Flux images are built locally and pushed by hand.
+# introducing CI: Quip Flux images are built locally and pushed by hand.
 #
 #   --platform linux/amd64   Quip Flux images are amd64-only. Never multi-arch.
 #   --provenance=false
@@ -25,7 +25,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_DIR}"
 
-REGISTRY="${REGISTRY:-registry.gitlab.com/quip-infra/explorer.quip.network}"
+REGISTRY="${REGISTRY:-registry.gitlab.com/quip.network/explorer.quip.network}"
 TAG_SUFFIX="${TAG_SUFFIX:-$(git rev-parse --short HEAD 2>/dev/null || echo local)}"
 PUSH="${PUSH:-}"
 
