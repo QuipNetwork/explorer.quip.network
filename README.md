@@ -10,10 +10,14 @@ up; this repo contains only the packaging, the proxy and the Flux deployment.
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.rehearsal.yml` | Measurement harness — Blockscout against the **live** endpoint, run locally |
-| `scripts/rehearse.sh` | Driver for the above: `up` / `watch` / `status` / `sample` / `down` |
+| `Dockerfile.{api,ui,proxy}` | The three deployed images — upstream Blockscout plus baked config |
+| `nginx-explorer.conf.template` | Single-origin proxy: UI at `/`, backend at `/api`, `/socket`, … |
 | `deploy/flux/` | Flux v8 app spec (a wizard starting point — the dashboard export is canonical) |
-| `docs/` | Cost, resource shape and cert-renewal record |
+| `scripts/build-images.sh` | Build/push, amd64-only, asserts the bake landed |
+| `scripts/validate-spec.py` | Offline Flux constraint checker for the app spec |
+| `docker-compose.preview.yml` + `scripts/preview.sh` | Run the **deployed images** locally for sign-off |
+| `docker-compose.rehearsal.yml` + `scripts/rehearse.sh` | Measurement harness against the live endpoint |
+| `scripts/send-test-transaction.mjs` | End-to-end proof: puts a real transaction on the testnet |
 
 ## Chain facts this deployment is built on
 
@@ -25,33 +29,143 @@ Measured against the live endpoint, 2026-08-11:
   `eth_getBlockByNumber`, so `FIRST_BLOCK=985665` is mandatory — Blockscout's catchup fetcher
   otherwise defaults to block 0 and grinds on ~985k dead requests forever.
 - Block time ~6.0 s (~14,300 blocks/day).
-- The sidecar serves `eth_*` only: `trace_block` returns *Method not found* and
-  `debug_traceBlockByNumber` returns `[]`. Hence `ETHEREUM_JSONRPC_VARIANT=anvil` and the internal /
-  pending transaction fetchers disabled — that is the accurate configuration, not a workaround.
-  Internal transactions and block rewards are genuinely unavailable from this endpoint.
+- The sidecar serves `eth_*` only. `trace_block` returns *Method not found* and
+  `debug_traceBlockByNumber` returns `[]`, so `ETHEREUM_JSONRPC_VARIANT=anvil` with the internal and
+  block-reward fetchers disabled is the accurate configuration, not a workaround — internal
+  transactions and block rewards are genuinely unavailable from this endpoint.
+- **No pubsub.** The WebSocket upgrades and carries JSON-RPC, but `eth_subscribe` returns *Method not
+  found*. Realtime indexing therefore works by polling `eth_blockNumber`, and
+  `ETHEREUM_JSONRPC_WS_URL` is deliberately not set. Consequence for developers pointed at this RPC:
+  ethers/viem on a **WebSocket** transport will never fire `provider.on("block")`; on **HTTP** they
+  poll and work.
 
-## Rehearsal
+## Resource shape and cost
 
-```sh
-scripts/rehearse.sh up       # generates .env.rehearsal, pulls, starts
-scripts/rehearse.sh status   # one-line progress
-scripts/rehearse.sh watch    # ticks until backfill completes, then exits
-scripts/rehearse.sh down     # stops and REMOVES the volume
-```
+Measured, not guessed. Upstream Blockscout publishes 16-core / 128 GB sizing that describes Ethereum
+mainnet and says nothing about a chain with ~109k mostly-empty EVM blocks.
 
-Output lands in `rehearsal/metrics.csv` (gitignored). It exists to answer four questions with numbers
-rather than upstream's mainnet-sized guesses: backfill wall-clock, peak backend RSS, peak Postgres
-RSS, and `pg_database_size` at head.
+| Component | Peak RSS | Allocated cpu / ram / hdd |
+|---|---|---|
+| `bsapi` | 472 MiB | 1.25 / 2000 MB / 1 GB |
+| `bsdb` | 469 MiB | 0.75 / 1500 MB / **100 GB** |
+| `bsui` | 186 MiB | 0.5 / 700 MB / 1 GB |
+| `bsproxy` | 10 MiB | 0.25 / 300 MB / 1 GB |
+| **Total** | | **2.75 cpu / 4500 MB / 103 GB → ~$3.20/month** |
 
-Backfill traffic is deliberately throttled (`INDEXER_CATCHUP_BLOCKS_CONCURRENCY=4`,
-`INDEXER_CATCHUP_BLOCKS_BATCH_SIZE=10`, against upstream defaults of 10/10). `evm-rpc.testnet` is a
-single Flux instance with no rate limit configured and no redundancy, and it is a live BD endpoint.
+Full backfill: **108,790 blocks in 117 min**, zero gaps, `finished_indexing: true`. Database at head
+**136 MiB** = 1,313 bytes/block ≈ **6.4 GiB/year**. Rate is not constant — it held ~22 blocks/s for
+the first ~4,000 s then stepped down to ~7–8.5, so **budget ~2 hours for a backfill**.
+
+Two sizing decisions that are load-bearing:
+
+- **cpu total is deliberately under 3.0.** Flux applies a 0.8× multiplier when `instances<4 AND cpu<3
+  AND ram<6000 AND hdd<150`. A cpu or ram change later needs a new subscription but does *not*
+  destroy the volume — only an `hdd` change does — so this is cheap to revise upward.
+- **`hdd` 100 GB on day one.** Changing it is a hard redeploy that destroys the volume on every
+  instance. At 6.4 GiB/year that is over a decade of runway, and it costs $0.02/GB.
+
+Run `scripts/validate-spec.py` after any spec edit — Flux's own `verifyappupdatespecifications` is
+blind on enterprise apps, and the dashboard only reports failures after the whole wizard is filled in.
+
+## What is enabled, and what is not
+
+Blockscout ships a large default-on surface. The rule applied here: **disable what cannot succeed or
+is provably wasted; keep what is merely idle.**
+
+**Indexer fetchers off:** internal transactions and block rewards (both derive from tracing the
+sidecar does not have, so they retry forever); pending transactions; and the **empty-blocks
+sanitizer** — it re-fetches "empty" blocks to confirm them, and on a chain where every block is empty
+it re-queries the whole chain forever against a single-instance endpoint.
+
+**Left on deliberately:** the token, NFT/token-instance and coin/token balance fetchers. They are idle
+only because the chain has no activity yet and are exactly what must work once it does.
+
+**Frontend:** an unconfigured image reports 6 of 50 features enabled; this one reports 3 — Advanced
+filter, API documentation, Web3 wallet integration. **Ads are on by default upstream** ("ads are
+enabled by default on all self-hosted instances") and are switched off, along with the gas tracker
+(every gas price is null on this chain) and the marketplace/DappScout. Merits, Mixpanel, GrowthBook
+and Google Analytics need an API host or token that is never supplied, so they cannot switch on via
+an image bump. **Re-run the audit after any base bump:** `docker run --rm <ui-image>` and read the
+boot checklist.
+
+**Connection pool:** Blockscout's defaults open ~100 Postgres connections and hold them idle while
+only 1–2 are ever active — which exhausts Postgres's default `max_connections=100` and produces
+*"sorry, too many clients already"* for everything else. Capped at `POOL_SIZE=20` /
+`POOL_SIZE_API=10`, taking connections to 31 and Postgres RSS from 469 MiB to ~150 MiB with no change
+in indexing rate. `bsdb` therefore needs **no `max_connections` override**.
+
+**GraphQL is blocked at the proxy.** `API_GRAPHQL_ENABLED=false` **does not work on 9.0.2** — the
+variable exists in upstream master but is not wired up in this release
+(blockscout/blockscout#11845); with it baked false, schema introspection still succeeded. Enforcement
+is two `^~` location blocks in nginx returning 404. Re-enabling means removing those **and** setting
+`API_GRAPHQL_MAX_COMPLEXITY`, or the original unbounded surface comes back.
+
+`/metrics` is not publicly reachable: it does not match the backend route, so it lands on the
+frontend as a 404. The Etherscan-compatible `proxy` module is absent, so there is no
+`eth_sendRawTransaction` route through the explorer.
+
+## Deploying
+
+Ordering matters in two places; both are called out.
+
+0. **The GitLab project must exist.** The container registry lives under it, so nothing can be pushed
+   until it does, and every step below depends on that push.
+1. `PUSH=1 scripts/build-images.sh` — amd64-only, `--provenance=false --sbom=false` so each tag is a
+   single-platform manifest whose printed digest *is* the image digest. It fails if an image was
+   built without `BAKE_PROD_ENV=1`; a silently neutral image starts cleanly and indexes the wrong
+   chain from block 0.
+2. Fill the spec: the three digests, a GitLab deploy token with `read_registry`, a fresh
+   `SECRET_KEY_BASE` (`openssl rand -hex 64`), and the Postgres password — which goes in **two**
+   places, `bsdb`'s env and `bsapi`'s `DATABASE_URL`. Re-run `scripts/validate-spec.py`.
+3. **⚠ Create the DNS record FIRST.** DNSimple CNAME `explorer.testnet.quip.network` →
+   `quipexplorer.app.runonflux.io`; confirm it resolves to `fdm-lb-*.runonflux.io` before touching
+   the dashboard. This is a hand-created CNAME, *not* a `flux-dns-controller` tenant.
+4. Deploy via the cloud.runonflux.com dashboard, not the API. Export the resulting spec — the export
+   is canonical.
+5. Apply the Custom Domain on the `bsproxy` port. Expect FDM's placeholder `CN=runonflux.io` cert for
+   ~7 min and the real Let's Encrypt cert at ~8.5 min. Applying before DNS resolves pushes FDM's ACME
+   into backoff, which is why step 3 comes first.
+
+**The app must be enterprise/encrypted.** A non-enterprise app's `compose` is readable from Flux's
+public API, and `environmentParameters` is part of it — deploying otherwise publishes
+`SECRET_KEY_BASE`, the Postgres password and the registry deploy token. Enterprise adds ~$0.80/month.
+Decide before subscribing; switching later means a new subscription.
+
+Expect the first boot to look unhealthy for a while: `bsapi` retries its migration until `bsdb`
+accepts connections (Flux has no cross-component ordering primitive, so the entrypoint retries the
+real migration rather than probing a port), and the initial backfill takes ~2 hours. Neither is a
+fault. Homepage stat tiles lag further still — they are cached aggregates recomputed on a schedule,
+so do not read them as a liveness check.
+
+## Verifying
+
+`scripts/preview.sh up` runs the **deployed images** locally on one origin, and
+`scripts/preview.sh check` asserts the decisions above against the running stack — GraphQL and
+`/metrics` blocked, site/API/docs/sitemap serving, the frontend checklist showing exactly three
+features, the empty-blocks sanitizer silent.
+
+`scripts/send-test-transaction.mjs` proves the transaction path end to end. The non-obvious part is
+funding: **an Ethereum address is not itself an account on this chain.** The runtime uses
+`pallet_revive::AccountId32Mapper`, whose fallback derivation for an unmapped H160 is the 20 address
+bytes followed by twelve `0xEE` bytes — and it is *that* 32-byte value the faucet must be given
+(`POST /request {"dest": "0x<64 hex>", "amount": <plancks>}`). Sending to the H160 goes nowhere.
+Amounts are plancks (12 decimals); `eth_*` balances are wei (18), bridged by
+`ReviveNativeToEthRatio = 1_000_000`.
 
 ## Operational notes
 
 Blockscout's Postgres is **100% derived state**. Nothing in it is authoritative and it is not backed
-up; the recovery for any volume loss is a re-backfill from `FIRST_BLOCK`. This is what makes the Flux
+up; the recovery for any volume loss is a re-backfill from `FIRST_BLOCK`. That is what makes Flux's
 "changing `hdd` or adding a component destroys the volume" constraint tolerable.
+
+Cert renewal is **FDM's**, on a ~90-day Let's Encrypt cycle. There is no dnsimple-certifier, no
+`flux-dns-controller` registry entry, no capability token and no Tarsnap cert seeding — the entire
+bring-up ceremony the bootnodes, `evm-rpc`, `status` and `check` each carry. Nothing to run.
+
+Known limits: raw-Docker FDM auto-TLS is documented but unrehearsed by us (proven only on Orbit
+apps); the origin port serves cleartext on the public instance IP; availability is bounded by
+`evm-rpc`'s single instance and its ~1 month of disk runway (QUI-954/955); and EIP-155 chain ID 20033
+is unregistered on chainlist.
 
 ## License
 

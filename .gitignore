@@ -7,8 +7,12 @@ rehearsal/metrics.csv
 rehearsal/.started_at
 rehearsal/*.log
 
-# Claude/superpowers working docs — local-only, never committed
-docs/superpowers/
+# Working docs — local-only, never committed. Matches every sibling infra repo:
+# bootnodes, status, check, pad, meet, flux-dns-controller, depin-images and
+# faucet all track ZERO files under docs/. Durable operational documentation
+# belongs in README.md, which is where bootnodes keeps its own. quip-validator
+# is the sole exception that tracks docs/, and it is not an infra repo.
+docs/
 
 # Generated preview secrets (throwaway, gitignored)
 .env.preview
