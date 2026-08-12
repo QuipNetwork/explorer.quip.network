@@ -42,7 +42,11 @@ build_one() {
         -t "${tag}" .
     if [ -n "${PUSH}" ]; then
         log "pushing ${tag}"
-        docker push "${tag}"
+        # >&2 is load-bearing: this function returns the tag on STDOUT and the caller
+        # captures it with $(...). docker push writes its transcript to stdout too, so
+        # without this the captured "tag" is the whole push log and every later use of
+        # it — the case match, docker image inspect, the digest lookup — gets garbage.
+        docker push "${tag}" >&2
     fi
     printf '%s\n' "${tag}"
 }
