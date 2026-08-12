@@ -32,8 +32,65 @@ BANNED_PORTS = {22, 23, 25, 53, 123, 161, 512, 513, 3388, 3389, 4444, 5800, 5900
 # config/default.js enterprisePorts — legal, but each adds a surcharge pre-divisor
 ENTERPRISE_PORTS = set(range(0, 1024)) | {8080, 8081, 8443, 6667}
 
+# Live USD rate table: https://stats.runonflux.io/apps/getappspecsusdprice — which is the URL
+# FluxOS itself fetches (appSpecHelpers.js:355), falling back to config.fluxapps.usdprice. Note
+# these are NOT the config.fluxapps.price fork values, and they are NOT what Flux's own docs quote
+# (the docs say enterprise $0.80 / staticip $0.40; the live table charges 4 and 2). The oracle wins.
+RATE_CPU, RATE_RAM, RATE_HDD = 0.15, 0.05, 0.02
+RATE_SCOPE, RATE_STATICIP, RATE_PORT = 4.0, 2.0, 2.0
+
+def repotag_has_tag(repotag):
+    """FluxOS requires a :TAG on every repotag, even when the image is digest-pinned.
+
+    ImageVerifier.imagePattern (imageVerifier.js:14) parses only
+    [HOST[:PORT]/][NAMESPACE/]REPOSITORY[:TAG] — there is no '@sha256:' branch anywhere in
+    it. Given a bare `postgres@sha256:...` it parses namespace='postgres', repository='',
+    tag=undefined and the registry lookup then fails with "Authentication failed: ... not
+    available or doesn't exist", which reads like a credentials problem and is not one.
+
+    The working form is `repo:TAG@sha256:DIGEST`: the regex's tag group stops at '@' (which
+    is outside its [\\w.-] class) and the unmatched digest tail is ignored by the parser,
+    while Docker still honours the digest on pull. 1049 of 1050 live Flux repotags carry a
+    plain :TAG; the sole digest-pinned one uses exactly this tag@digest form.
+    """
+    base = repotag.split("@", 1)[0]      # drop any digest suffix
+    last = base.rsplit("/", 1)[-1]       # only the final path segment can hold the tag
+    return ":" in last and last.split(":", 1)[1] != ""
+
+
 failures = []
 checks = 0
+
+
+def app_price(cpu, ram, hdd, instances, staticip, enterprise, ent_ports):
+    """Reproduce FluxOS's monthly USD price — appUtilities.js:112-140 + appSpecHelpers.js:426-434.
+
+    The rounding is the part that is easy to get wrong: FluxOS ceilings to CENTS
+    (`Math.ceil(x * 100) / 100`), not to whole dollars. An integer ceil overstates this spec by
+    ~$0.40. Verified to the cent against POST /apps/calculatefiatandfluxprice on three arms
+    (as-specced 2.78, staticip off 2.26, hdd 150 -> 3.44).
+    """
+    total = (cpu * RATE_CPU * 10) + (ram * RATE_RAM / 100) + (hdd * RATE_HDD)
+    if enterprise:
+        total += RATE_SCOPE          # `scope`: enterprise/encrypted, or node-targeted
+    if staticip:
+        total += RATE_STATICIP
+    total += ent_ports * RATE_PORT
+
+    price = math.ceil(total / 3 * 100) / 100          # base is ALWAYS total/3, ceiled to cents
+    extra = instances - 1
+    if extra > 0:
+        if price < 0.50 and extra > 2:
+            price += extra * 0.50
+        else:
+            price = (math.ceil(price * extra * 100) + math.ceil(price * 100)) / 100
+
+    if instances < 4:                                  # applyHWDiscount
+        if cpu < 3 and ram < 6000 and hdd < 150:
+            price *= 0.8
+        elif cpu < 7 and ram < 29000 and hdd < 370:
+            price *= 0.9
+    return price
 
 
 def chk(cond, msg):
@@ -76,11 +133,22 @@ def main(path):
         for e in c["environmentParameters"]:
             chk(len(e) <= 400, f"{n}: env entry over 400 chars: {e[:40]}...")
             chk("=" in e and e.split("=", 1)[1] != "", f"{n}: env value must not be empty: {e[:40]}")
+            # A forgotten <REPLACE> is non-empty, so the emptiness check above sails past it
+            # and the spec deploys with a literal placeholder as the Postgres password.
+            chk("<REPLACE" not in e,
+                f"{n}: env value is still a placeholder: {e.split('=', 1)[0]}=<REPLACE...>")
         chk(len(c["commands"]) <= 20, f"{n}: max 20 commands")
         for cmd in c["commands"]:
             chk(len(cmd) <= 400, f"{n}: command over 400 chars")
         chk(len(c["description"]) <= 256, f"{n}: description <= 256 chars")
         chk(len(c["repotag"]) <= 200, f"{n}: repotag <= 200 chars")
+        if "<REPLACE" in c["repotag"]:
+            chk(False, f"{n}: repotag is still the placeholder {c['repotag']} — fill it "
+                       "with repo:TAG@sha256:DIGEST before deploying")
+        else:
+            chk(repotag_has_tag(c["repotag"]),
+                f"{n}: repotag has no :TAG — {c['repotag'][:70]}. FluxOS cannot parse a bare "
+                "digest reference; use repo:TAG@sha256:DIGEST (see repotag_has_tag)")
         for d in c["domains"]:
             chk(len(d) <= 253, f"{n}: domain entry <= 253 chars")
 
@@ -101,18 +169,15 @@ def main(path):
 
     instances = spec.get("instances", 1)
     staticip = bool(spec.get("staticip"))
+    enterprise = bool(spec.get("enterprise")) or bool(spec.get("nodes"))
     print(f"\nTOTALS  cpu={tot_cpu}  ram={tot_ram} MB  hdd={tot_hdd} GB  "
-          f"instances={instances}  staticip={staticip}")
+          f"instances={instances}  staticip={staticip}  enterprise={enterprise}")
 
-    discount = instances < 4 and tot_cpu < 3 and tot_ram < 6000 and tot_hdd < 150
-    raw = (tot_cpu * 0.15 * 10) + (tot_ram * 0.05 / 100) + (tot_hdd * 0.02) \
-        + (2.0 if staticip else 0.0) + (ent_count * 2.0)
-    per = math.ceil(raw / 3)
-    est = per * instances * (0.8 if discount else 1.0)
-    print(f"0.8x discount (instances<4, cpu<3, ram<6000, hdd<150): {discount}")
-    print(f"price estimate ~= {est:.2f}/month  (raw={raw:.3f}, perInstance=ceil({raw/3:.3f})={per})")
-    if not discount and tot_cpu >= 3:
-        print(f"HINT: cpu total is {tot_cpu}; dropping below 3.0 would apply the 0.8x multiplier")
+    for label, ent in (("plain", False), ("enterprise", True)):
+        price = app_price(tot_cpu, tot_ram, tot_hdd, instances, staticip, ent, ent_count)
+        mark = "  <-- this spec" if ent == enterprise else ""
+        print(f"price {label:10s} ~= {price:.2f}/month{mark}")
+    print("Paying in FLUX takes a further 5% off (fluxDiscount).")
     print("The dashboard calculator is authoritative — confirm there before subscribing.")
 
     print(f"\n{checks - len(failures)}/{checks} checks passed")

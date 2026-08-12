@@ -9,6 +9,12 @@
 .env.*
 *.env
 
+# The deployable app spec, once the <REPLACE> markers are filled. It carries the
+# Postgres password and SECRET_KEY_BASE in environmentParameters, so the filled
+# copy is a secret even though deploy/flux/explorer-app-spec.json is not. Same
+# pattern and same reason as quip-ipfs-node's deploy/flux/quipipfs.filled.json.
+deploy/flux/*.filled.json
+
 # Never belongs in this repo. The deployment gets its certificate from Flux's
 # FDM, so there is no legitimate reason for key material to appear here. This
 # is a backstop against a stray copy, not part of any workflow.
