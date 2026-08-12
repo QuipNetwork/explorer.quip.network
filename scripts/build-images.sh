@@ -79,7 +79,14 @@ for t in "${TAGS[@]}"; do
             ;;
     esac
     if [ -n "${PUSH}" ]; then
-        printf '  %s\n    %s\n' "${t}" "$(docker image inspect "${t}" --format '{{index .RepoDigests 0}}' 2>/dev/null || echo '(digest available after push)')"
+        # Select the RepoDigest belonging to THIS registry rather than trusting
+        # `index .RepoDigests 0`. An image ID that also carries a local tag (a
+        # test build, a preview harness) accumulates several RepoDigests, and
+        # index 0 is then whichever repository Docker happens to list first —
+        # a digest for a different repository, printed as if it were ours.
+        digest="$(docker image inspect "${t}" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null \
+                  | grep "^${REGISTRY}@" | head -1)"
+        printf '  %s\n    %s\n' "${t}" "${digest:-(digest unavailable — did the push succeed?)}"
     else
         printf '  %s\n' "${t}"
     fi
