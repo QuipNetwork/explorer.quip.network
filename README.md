@@ -50,7 +50,15 @@ mainnet and says nothing about a chain with ~109k mostly-empty EVM blocks.
 | `bsdb` | 469 MiB | 0.75 / 1500 MB / **100 GB** |
 | `bsui` | 186 MiB | 0.5 / 700 MB / 1 GB |
 | `bsproxy` | 10 MiB | 0.25 / 300 MB / 1 GB |
-| **Total** | | **2.75 cpu / 4500 MB / 103 GB → ~$3.20/month** |
+| **Total** | | **2.75 cpu / 4500 MB / 103 GB → $3.86/month** (enterprise; $2.78 plain) |
+
+Those two figures come from Flux's own oracle, `POST /apps/calculatefiatandfluxprice`, not from arithmetic:
+the spec as written quotes `{"usd": 2.78}`, and `scripts/validate-spec.py` reproduces that to the cent on
+three arms (staticip off → 2.26, `hdd` 150 → 3.44). Note FluxOS ceilings the per-instance price to **cents**
+(`appUtilities.js:125`), not to whole dollars — an integer ceiling overstates this spec by ~$0.40 and is where
+an earlier `$3.20 / $4.00` came from. Flux's *documentation* is also stale here: it prices enterprise at $0.80
+and static IP at $0.40, while the live rate table charges 4 and 2 pre-divisor. Enterprise really costs
+**+$1.08/month**; paying in FLUX takes a further 5% off.
 
 Full backfill: **108,790 blocks in 117 min**, zero gaps, `finished_indexing: true`. Database at head
 **136 MiB** = 1,313 bytes/block ≈ **6.4 GiB/year**. Rate is not constant — it held ~22 blocks/s for
@@ -63,6 +71,12 @@ Two sizing decisions that are load-bearing:
   destroy the volume — only an `hdd` change does — so this is cheap to revise upward.
 - **`hdd` 100 GB on day one.** Changing it is a hard redeploy that destroys the volume on every
   instance. At 6.4 GiB/year that is over a decade of runway, and it costs $0.02/GB.
+
+**Image size does not count against a component's `hdd`.** Worth stating because `bsui` is an 878 MB
+image against `hdd: 1`, which looks alarming and is fine. `hdd` is `fallocate`'d into a separate volume
+file mounted at `containerData` (`advancedWorkflows.js:517`); image layers live on the container's root
+filesystem, which gets an independent quota of `hddFileSystemMinimum` = 10 GB
+(`dockerService.js:1000-1012`), and only on xfs nodes with `pquota` — elsewhere it is unquotad.
 
 Run `scripts/validate-spec.py` after any spec edit — Flux's own `verifyappupdatespecifications` is
 blind on enterprise apps, and the dashboard only reports failures after the whole wizard is filled in.
@@ -128,10 +142,33 @@ Ordering matters in two places; both are called out.
    ~7 min and the real Let's Encrypt cert at ~8.5 min. Applying before DNS resolves pushes FDM's ACME
    into backoff, which is why step 3 comes first.
 
+### Two Flux-specific landmines, both found by the dashboard rejecting a valid-looking spec
+
+**`repotag` must carry a `:TAG`, even when digest-pinned.** FluxOS's `ImageVerifier.imagePattern`
+parses only `[HOST/][NAMESPACE/]REPOSITORY[:TAG]` and has no `@sha256:` branch at all, so a bare
+`repo@sha256:…` parses as `namespace=repo, repository='', tag=undefined` and is rejected with
+*"Authentication failed: … not available or doesn't exist"* — which reads as a credentials problem and
+is not one. Use `repo:TAG@sha256:DIGEST`: the regex stops at the `@` and ignores the digest tail, while
+Docker still honours the digest on pull. The dashboard reports only the **first** offending component,
+so fix all of them at once. `scripts/validate-spec.py` now enforces this.
+
+**Blockscout cannot parse an underscore in the DB hostname.** Blockscout 9.0.2 extracts DB parameters
+from `DATABASE_URL` with a regex (`explorer/repo/config_helper.ex:63`) whose hostname class is letters,
+digits, hyphen and dot. Flux's inter-component DNS name is *always* `flux<component>_<appname>`, so the
+URL never matches, `Regex.named_captures` returns `nil`, and `Keyword.new(nil)` raises
+`(Protocol.UndefinedError) protocol Enumerable not implemented for nil` during repo init — before a
+socket is opened. It therefore looks exactly like "the database is not up yet", and no amount of
+retrying helps. **No compose rehearsal can surface this**, because a compose service name (`bsdb`) has
+no underscore. `entrypoint-api.sh` decomposes such a URL into `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/
+`PGDATABASE`, which Postgrex reads directly with no such restriction; `PGHOST` keeps the *name*, so it
+re-resolves on reconnect and survives `bsdb` changing IP.
+
 **The app must be enterprise/encrypted.** A non-enterprise app's `compose` is readable from Flux's
 public API, and `environmentParameters` is part of it — deploying otherwise publishes
 `SECRET_KEY_BASE` and the Postgres password. This is about the app's own secrets and would be
-required even with a private registry. Enterprise adds ~$0.80/month. Decide before subscribing;
+required even with a private registry. Enterprise adds $1.08/month. It also **disables geolocation
+targeting**, which is the documented escape from a sick host — the Priority Nodes tab replaces it. Decide
+before subscribing;
 switching later means a new subscription.
 
 Expect the first boot to look unhealthy for a while: `bsapi` retries its migration until `bsdb`
@@ -165,7 +202,7 @@ Cert renewal is **FDM's**, on a ~90-day Let's Encrypt cycle. There is no dnsimpl
 `flux-dns-controller` registry entry, no capability token and no Tarsnap cert seeding — the entire
 bring-up ceremony the bootnodes, `evm-rpc`, `status` and `check` each carry. Nothing to run.
 
-Known limits: raw-Docker FDM auto-TLS is documented but unrehearsed here (proven only on Orbit apps);
+Known limits:
 the origin port serves cleartext behind FDM, which terminates TLS and re-originates in the clear; the
 explorer's availability is bounded by the upstream RPC endpoint, which is currently a single
 instance; and EIP-155 chain ID 20033 is not registered on chainlist.
