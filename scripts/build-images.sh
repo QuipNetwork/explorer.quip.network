@@ -67,7 +67,16 @@ for t in "${TAGS[@]}"; do
             docker image inspect "${t}" --format '{{range .Config.Env}}{{println .}}{{end}}' \
                 | grep -q '^CHAIN_ID=20033$' || { log "FATAL: ${t} has no baked CHAIN_ID — built without BAKE_PROD_ENV?"; exit 1; }
             docker image inspect "${t}" --format '{{range .Config.Env}}{{println .}}{{end}}' \
-                | grep -q '^FIRST_BLOCK=985665$' || { log "FATAL: ${t} has no baked FIRST_BLOCK"; exit 1; }
+                | grep -q '^FIRST_BLOCK=0$' || { log "FATAL: ${t} has no baked FIRST_BLOCK"; exit 1; }
+            # Pointing at the RETIRED endpoint is as fatal as a wrong FIRST_BLOCK
+            # and was previously unasserted. It also carries more weight now:
+            # FIRST_BLOCK is legitimately 0 on aglais, so that check no longer
+            # distinguishes a neutral build by VALUE (it still catches an EMPTY
+            # one, which is what a missing build-arg produces). This is the assert
+            # that catches an image pointed at the wrong chain.
+            docker image inspect "${t}" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                | grep -q '^ETHEREUM_JSONRPC_HTTP_URL=https://evm-rpc\.aglais\.quip\.network:20049/$' \
+                || { log "FATAL: ${t} is not pointed at the aglais EVM RPC"; exit 1; }
             ;;
         *:ui-*)
             docker image inspect "${t}" --format '{{range .Config.Env}}{{println .}}{{end}}' \

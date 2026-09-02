@@ -30,11 +30,25 @@ ARG BAKE_PROD_ENV=
 # genuinely unavailable and the two fetchers below are switched off to match.
 # Leaving them on produces an endlessly retrying fetcher, not more data.
 #
-# FIRST_BLOCK is LOAD-BEARING. eth_getBlockByNumber returns null for every block
-# below 985,665 (binary-searched 2026-08-11: 985,665 resolves, 985,664 is null) —
-# that is where the EVM went live on this chain. Blockscout's catchup fetcher
-# defaults to block 0, so without this it walks ~985k blocks that can never
-# resolve and never reaches a complete index.
+# FIRST_BLOCK is LOAD-BEARING, and it is 0 on aglais for a reason worth stating
+# rather than leaving to look like a default.
+#
+# On the OLD chain this was 985,665: pallet-revive arrived by runtime upgrade
+# partway through that chain's life, so eth_getBlockByNumber returned null for
+# every block below it (binary-searched 2026-08-11). Blockscout's catchup fetcher
+# defaults to 0 and would have walked ~985k blocks that can never resolve.
+#
+# Aglais was relaunched WITH revive already in the genesis runtime, so the EVM
+# exists from block 0 and there is no offset. Measured 2026-09-02 against the live
+# endpoint, with eth_syncing:false checked FIRST — a still-syncing node returns
+# null at low heights and yields a plausible but wrong HIGH answer:
+#   eth_getBlockByNumber(0) -> 0    eth_getBlockByNumber(1) -> 1
+# Carrying 985,665 over would have indexed nothing for ~340 days.
+#
+# ⚠ Because 0 is also what an unbaked image effectively gets, the FIRST_BLOCK
+# assert in build-images.sh no longer discriminates intent on its own. The
+# ETHEREUM_JSONRPC_HTTP_URL assert added alongside it is what now catches a
+# neutral or mis-pointed build.
 # There is deliberately NO ETHEREUM_JSONRPC_WS_URL here.
 #
 # The endpoint's WebSocket works — it upgrades (101) and carries JSON-RPC — but
@@ -49,9 +63,9 @@ ARG BAKE_PROD_ENV=
 # and the realtime fetcher stayed 0-1 blocks behind head across four minutes,
 # with zero websocket errors logged — identical to running with it set.
 ENV ETHEREUM_JSONRPC_VARIANT=${BAKE_PROD_ENV:+anvil} \
-    ETHEREUM_JSONRPC_HTTP_URL=${BAKE_PROD_ENV:+https://evm-rpc.testnet.quip.network:20049/} \
+    ETHEREUM_JSONRPC_HTTP_URL=${BAKE_PROD_ENV:+https://evm-rpc.aglais.quip.network:20049/} \
     CHAIN_ID=${BAKE_PROD_ENV:+20033} \
-    FIRST_BLOCK=${BAKE_PROD_ENV:+985665}
+    FIRST_BLOCK=${BAKE_PROD_ENV:+0}
 
 # ── Fetchers switched OFF ───────────────────────────────────────────────────
 #
@@ -71,7 +85,7 @@ ENV ETHEREUM_JSONRPC_VARIANT=${BAKE_PROD_ENV:+anvil} \
 #     This one matters most. It re-fetches blocks it believes are empty to
 #     confirm they really are. On Quip testnet essentially EVERY block is empty,
 #     so it re-queries the entire chain forever, at batch 10 every 10s, against
-#     evm-rpc.testnet — a single Flux instance with no redundancy that also
+#     evm-rpc.aglais — a single Flux instance with no redundancy that also
 #     serves BD traffic. Measured running continuously before being disabled;
 #     silencing it left the indexing rate unchanged at ~21 blocks/s.
 #
@@ -110,7 +124,7 @@ ENV POOL_SIZE=${BAKE_PROD_ENV:+20} \
 # ── Indexer pacing ──────────────────────────────────────────────────────────
 #
 # Upstream defaults are 10 x 10 = 100 blocks in flight (config/runtime.exs).
-# evm-rpc.testnet is a SINGLE Flux instance with no rate limit configured, no
+# evm-rpc.aglais is a SINGLE Flux instance with no rate limit configured, no
 # redundancy, and live BD consumers, so we index at 4 x 10 = 40 instead.
 # Measured in the QUI-992 rehearsal: ~24 blocks/s sustained, with the RPC still
 # answering eth_blockNumber in ~0.56s throughout. Raising these is a decision
@@ -128,8 +142,8 @@ ENV COIN=${BAKE_PROD_ENV:+AGLS} \
     NETWORK=${BAKE_PROD_ENV:+Quip} \
     SUBNETWORK="${BAKE_PROD_ENV:+Quip Testnet}" \
     DISABLE_EXCHANGE_RATES=${BAKE_PROD_ENV:+true} \
-    API_URL=${BAKE_PROD_ENV:+https://explorer.testnet.quip.network} \
-    WEBAPP_URL=${BAKE_PROD_ENV:+https://explorer.testnet.quip.network} \
+    API_URL=${BAKE_PROD_ENV:+https://explorer.aglais.quip.network} \
+    WEBAPP_URL=${BAKE_PROD_ENV:+https://explorer.aglais.quip.network} \
     PORT=${BAKE_PROD_ENV:+4000}
 
 # ECTO_USE_SSL defaults to TRUE upstream. bsdb is a sibling component on the

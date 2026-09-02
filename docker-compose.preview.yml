@@ -11,7 +11,7 @@
 #     live and inspectable rather than taken on trust
 #
 # ONE thing is deliberately different, and it is the only thing:
-# the images bake explorer.testnet.quip.network as the browser-facing host,
+# the images bake explorer.aglais.quip.network as the browser-facing host,
 # because that is what FDM will serve. Locally that name does not resolve to
 # this stack, so the frontend's API/APP host is overridden to localhost. This
 # also demonstrates the bake staying runtime-overridable — the same property
@@ -68,7 +68,7 @@ services:
         condition: service_started
     environment:
       # The one deliberate deviation from the deployed image: point the browser
-      # at this stack instead of at explorer.testnet.quip.network.
+      # at this stack instead of at explorer.aglais.quip.network.
       NEXT_PUBLIC_API_PROTOCOL: http
       NEXT_PUBLIC_API_HOST: localhost
       NEXT_PUBLIC_API_PORT: "${PREVIEW_PORT:-20050}"

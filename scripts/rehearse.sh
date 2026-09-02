@@ -29,8 +29,8 @@ OUT_DIR="${REPO_DIR}/rehearsal"
 CSV="${OUT_DIR}/metrics.csv"
 START_MARKER="${OUT_DIR}/.started_at"
 
-RPC="${QUIP_EVM_RPC_HTTP:-https://evm-rpc.testnet.quip.network:20049/}"
-FIRST_BLOCK="${QUIP_FIRST_BLOCK:-985665}"
+RPC="${QUIP_EVM_RPC_HTTP:-https://evm-rpc.aglais.quip.network:20049/}"
+FIRST_BLOCK="${QUIP_FIRST_BLOCK:-0}"
 INTERVAL="${INTERVAL:-60}"
 
 dc() { docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"; }

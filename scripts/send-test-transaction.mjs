@@ -24,8 +24,8 @@
 // the H160 itself would go nowhere.
 import { ethers } from 'ethers'
 
-const RPC = 'https://evm-rpc.testnet.quip.network:20049/'
-const FAUCET = 'https://faucet.testnet.quip.network/request'
+const RPC = 'https://evm-rpc.aglais.quip.network:20049/'
+const FAUCET = 'https://faucet.aglais.quip.network/request'
 const CHAIN_ID = 20033n
 // 12 native decimals -> 18 EVM decimals (ReviveNativeToEthRatio = 1_000_000)
 const NATIVE_TO_ETH_RATIO = 1_000_000n

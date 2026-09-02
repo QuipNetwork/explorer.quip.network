@@ -135,7 +135,7 @@
     "     the digest tail, while Docker still honours the digest on pull.",
     "     scripts/validate-spec.py now enforces this. Note the dashboard reports",
     "     only the FIRST bad component, so fix all four at once.",
-    "  2. Create the DNSimple CNAME explorer.testnet.quip.network ->",
+    "  2. Create the DNSimple CNAME explorer.aglais.quip.network ->",
     "     quipexplorer.app.runonflux.io and confirm it resolves to fdm-lb-*",
     "     BEFORE applying the Custom Domain. Applying first pushes FDM's ACME",
     "     into backoff.",
@@ -167,7 +167,7 @@
         "POSTGRES_USER=blockscout",
         "POSTGRES_PASSWORD=<REPLACE>",
         "POSTGRES_DB=blockscout",
-        "PGDATA=/var/lib/postgresql/data/pgdata"
+        "PGDATA=/var/lib/postgresql/data/pgdata-aglais"
       ],
       "commands": [],
       "cpu": 0.75,

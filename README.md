@@ -2,8 +2,8 @@
 
 Blockscout EVM block explorer for the Quip testnet — QUI-992 (the hosting half of QUI-905).
 
-Serves `https://explorer.testnet.quip.network`, indexing the testnet's pallet-revive EVM via the
-existing QUI-966 JSON-RPC sidecar at `evm-rpc.testnet.quip.network:20049`. No second adapter is stood
+Serves `https://explorer.aglais.quip.network`, indexing the testnet's pallet-revive EVM via the
+existing QUI-966 JSON-RPC sidecar at `evm-rpc.aglais.quip.network:20049`. No second adapter is stood
 up; this repo contains only the packaging, the proxy and the Flux deployment.
 
 ## What is here
@@ -25,9 +25,14 @@ Measured against the live endpoint, 2026-08-11:
 
 - EIP-155 chain ID **20033** (`0x4e41`) — `ReviveChainId` on the testnet runtime, not the `1337`
   dev-chain-id build.
-- EVM history starts at block **985,665**. Every block below that returns `null` from
-  `eth_getBlockByNumber`, so `FIRST_BLOCK=985665` is mandatory — Blockscout's catchup fetcher
-  otherwise defaults to block 0 and grinds on ~985k dead requests forever.
+- EVM history starts at block **0**, so `FIRST_BLOCK=0`. Aglais was relaunched with
+  pallet-revive already in the genesis runtime, so there is no pre-EVM prefix to skip.
+  Measured 2026-09-02 against the live endpoint (with `eth_syncing:false` asserted first,
+  since a syncing node returns `null` at low heights and yields a wrong HIGH answer):
+  `eth_getBlockByNumber(0)` → 0, `(1)` → 1.
+  On the OLD chain this was **985,665** — revive arrived there by runtime upgrade partway
+  through, so every block below that returned `null` and the catchup fetcher would grind on
+  ~985k dead requests. Carrying that value onto aglais would index nothing for ~340 days.
 - Block time ~6.0 s (~14,300 blocks/day).
 - The sidecar serves `eth_*` only. `trace_block` returns *Method not found* and
   `debug_traceBlockByNumber` returns `[]`, so `ETHEREUM_JSONRPC_VARIANT=anvil` with the internal and
@@ -133,7 +138,7 @@ Ordering matters in two places; both are called out.
    Re-run `scripts/validate-spec.py`. `repoauth` stays **empty**: this project is public, so its
    registry is anonymously pullable, and a placeholder credential would be sent verbatim and answered
    with a 401 rather than falling back to anonymous.
-3. **⚠ Create the DNS record FIRST.** DNSimple CNAME `explorer.testnet.quip.network` →
+3. **⚠ Create the DNS record FIRST.** DNSimple CNAME `explorer.aglais.quip.network` →
    `quipexplorer.app.runonflux.io`; confirm it resolves to `fdm-lb-*.runonflux.io` before touching
    the dashboard. This is a hand-created CNAME, *not* a `flux-dns-controller` tenant.
 4. Deploy via the cloud.runonflux.com dashboard, not the API. Export the resulting spec — the export

@@ -5,23 +5,25 @@
 # actually takes, how much RSS the backend and Postgres actually peak at, and how
 # big Postgres actually gets at head. Upstream Blockscout publishes 16 core /
 # 128 GB / 4 TB figures that are sized for Ethereum mainnet and tell us nothing
-# about a chain whose EVM history starts at block 985,665.
+# about a chain a few thousand blocks old with a full-history EVM.
 #
 # Differences from Roman's !65 compose (docker-compose.evm-explorer.yml in
 # quip-validator), and why:
 #
 #   - No `eth-rpc` service and no native node. !65 builds a --dev chain from
 #     source; we point at the already-deployed QUI-966 sidecar at
-#     evm-rpc.testnet.quip.network:20049. That endpoint is the AC #2 requirement
+#     evm-rpc.aglais.quip.network:20049. That endpoint is the AC #2 requirement
 #     ("no second adapter"), and it is already archive-complete: the node runs
 #     --state-pruning=archive --blocks-pruning=archive and the sidecar
 #     deliberately omits --eth-pruning.
 #   - CHAIN_ID 20033 (0x4e41), not 1337. 1337 is the dev-chain-id feature build;
 #     20033 is ReviveChainId on the real testnet runtime.
-#   - FIRST_BLOCK is set and is MANDATORY. eth_getBlockByNumber returns null for
-#     every block below 985,665 (verified by binary search 2026-08-11: 985,665
-#     resolves, 985,664 is null). Blockscout's catchup fetcher defaults to block
-#     0, so without this it would grind on ~985k dead requests forever.
+#   - FIRST_BLOCK is 0 on aglais and set explicitly. The chain launched with
+#     pallet-revive in its genesis runtime, so the EVM exists from block 0 and
+#     there is no pre-EVM prefix to skip (measured 2026-09-02: block 0 and 1 both
+#     resolve, with eth_syncing:false asserted first). It was 985,665 on the OLD
+#     chain, where revive arrived by runtime upgrade; carrying that value across
+#     would have indexed nothing until aglais passed ~986k blocks.
 #   - Service names match the Flux component names (bsdb/bsapi/bsui) so the
 #     rehearsal and the deployed app stay legible against each other.
 #
@@ -74,13 +76,13 @@ services:
     command: sh -c "bin/blockscout eval 'Elixir.Explorer.ReleaseTasks.create_and_migrate()' && bin/blockscout start"
     environment:
       ETHEREUM_JSONRPC_VARIANT: anvil
-      ETHEREUM_JSONRPC_HTTP_URL: ${QUIP_EVM_RPC_HTTP:-https://evm-rpc.testnet.quip.network:20049/}
+      ETHEREUM_JSONRPC_HTTP_URL: ${QUIP_EVM_RPC_HTTP:-https://evm-rpc.aglais.quip.network:20049/}
       # No ETHEREUM_JSONRPC_WS_URL: the endpoint's WebSocket carries JSON-RPC but
       # has no pubsub (eth_subscribe -> Method not found), so Blockscout polls
       # eth_blockNumber instead. Verified: with it fully unset the realtime
       # fetcher still held 0-1 blocks behind head.
       CHAIN_ID: "20033"
-      FIRST_BLOCK: "${QUIP_FIRST_BLOCK:-985665}"
+      FIRST_BLOCK: "${QUIP_FIRST_BLOCK:-0}"
       INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER: "true"
       INDEXER_DISABLE_BLOCK_REWARD_FETCHER: "true"
       INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER: "true"
@@ -101,7 +103,7 @@ services:
       ECTO_USE_SSL: "false"
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set by scripts/rehearse.sh}
       PORT: "4000"
-      # Deliberately conservative for the first run. evm-rpc.testnet is a SINGLE
+      # Deliberately conservative for the first run. evm-rpc.aglais is a SINGLE
       # Flux instance with no rate limit configured and no redundancy, and it is
       # a live endpoint other consumers depend on. 4 x 10 = 40 blocks in flight is a
       # polite opening bid; raise it in .env once the RPC shrugs this off.
@@ -134,7 +136,7 @@ services:
       # 12 native decimals map to 18 EVM decimals via ReviveNativeToEthRatio
       # (1_000_000, runtime/src/configs/mod.rs:232). Carried over from !65.
       NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS: "18"
-      NEXT_PUBLIC_NETWORK_RPC_URL: ${QUIP_EVM_RPC_HTTP:-https://evm-rpc.testnet.quip.network:20049/}
+      NEXT_PUBLIC_NETWORK_RPC_URL: ${QUIP_EVM_RPC_HTTP:-https://evm-rpc.aglais.quip.network:20049/}
     ports:
       - "${REHEARSAL_UI_PORT:-3000}:3000"
 

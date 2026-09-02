@@ -30,11 +30,11 @@ ARG BAKE_PROD_ENV=
 # because these describe what the BROWSER connects to. FDM terminates TLS in
 # front of us; the cleartext hop is between FDM and nginx and is invisible here.
 ENV NEXT_PUBLIC_API_PROTOCOL=${BAKE_PROD_ENV:+https} \
-    NEXT_PUBLIC_API_HOST=${BAKE_PROD_ENV:+explorer.testnet.quip.network} \
+    NEXT_PUBLIC_API_HOST=${BAKE_PROD_ENV:+explorer.aglais.quip.network} \
     NEXT_PUBLIC_API_BASE_PATH=${BAKE_PROD_ENV:+/} \
     NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL=${BAKE_PROD_ENV:+wss} \
     NEXT_PUBLIC_APP_PROTOCOL=${BAKE_PROD_ENV:+https} \
-    NEXT_PUBLIC_APP_HOST=${BAKE_PROD_ENV:+explorer.testnet.quip.network}
+    NEXT_PUBLIC_APP_HOST=${BAKE_PROD_ENV:+explorer.aglais.quip.network}
 
 # ── Chain identity as presented to users ────────────────────────────────────
 #
@@ -48,7 +48,7 @@ ENV NEXT_PUBLIC_NETWORK_NAME="${BAKE_PROD_ENV:+Quip Testnet}" \
     NEXT_PUBLIC_NETWORK_CURRENCY_NAME=${BAKE_PROD_ENV:+Aglais} \
     NEXT_PUBLIC_NETWORK_CURRENCY_SYMBOL=${BAKE_PROD_ENV:+AGLS} \
     NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS=${BAKE_PROD_ENV:+18} \
-    NEXT_PUBLIC_NETWORK_RPC_URL=${BAKE_PROD_ENV:+https://evm-rpc.testnet.quip.network:20049/}
+    NEXT_PUBLIC_NETWORK_RPC_URL=${BAKE_PROD_ENV:+https://evm-rpc.aglais.quip.network:20049/}
 
 # ── Optional feature surface, held OFF ──────────────────────────────────────
 #
