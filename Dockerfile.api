@@ -1,0 +1,188 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Blockscout backend (indexer + API) for the Quip testnet, QUI-992.
+#
+# This image exists for one reason: Flux hard-caps each app component at 20
+# environment variables, and Blockscout needs far more than 20. So every
+# non-secret constant is baked here and only the two real secrets
+# (SECRET_KEY_BASE, and the password inside DATABASE_URL) are left for the Flux
+# app spec to supply. Same trick, same reason as
+# bootnodes.quip.network/deploy/flux/Dockerfile.flux's BAKE_EVMRPC_ENV.
+#
+# The ${BAKE_PROD_ENV:+...} idiom emits each constant only when the build-arg is
+# non-empty. Building WITHOUT the arg produces a neutral image with every value
+# unset, which is what lets the rehearsal harness and any future test reuse this
+# same Dockerfile without inheriting production constants. Docker ENV stays
+# overridable at runtime, so the Flux spec still wins over anything baked.
+#
+# Build:
+#   docker build -f Dockerfile.api --build-arg BAKE_PROD_ENV=1 -t <registry>:api-<sha> .
+FROM ghcr.io/blockscout/blockscout:9.0.2
+
+ARG BAKE_PROD_ENV=
+
+# ── Chain identity and the RPC it indexes ───────────────────────────────────
+#
+# ETHEREUM_JSONRPC_VARIANT=anvil is the ACCURATE setting, not a workaround.
+# Probed against the live endpoint 2026-08-11: trace_block returns
+# "Method not found" and debug_traceBlockByNumber returns []. The pallet-revive
+# sidecar serves eth_* only, so internal transactions and block rewards are
+# genuinely unavailable and the two fetchers below are switched off to match.
+# Leaving them on produces an endlessly retrying fetcher, not more data.
+#
+# FIRST_BLOCK is LOAD-BEARING, and it is 0 on aglais for a reason worth stating
+# rather than leaving to look like a default.
+#
+# On the OLD chain this was 985,665: pallet-revive arrived by runtime upgrade
+# partway through that chain's life, so eth_getBlockByNumber returned null for
+# every block below it (binary-searched 2026-08-11). Blockscout's catchup fetcher
+# defaults to 0 and would have walked ~985k blocks that can never resolve.
+#
+# Aglais was relaunched WITH revive already in the genesis runtime, so the EVM
+# exists from block 0 and there is no offset. Measured 2026-09-02 against the live
+# endpoint, with eth_syncing:false checked FIRST — a still-syncing node returns
+# null at low heights and yields a plausible but wrong HIGH answer:
+#   eth_getBlockByNumber(0) -> 0    eth_getBlockByNumber(1) -> 1
+# Carrying 985,665 over would have indexed nothing for ~340 days.
+#
+# ⚠ Because 0 is also what an unbaked image effectively gets, the FIRST_BLOCK
+# assert in build-images.sh no longer discriminates intent on its own. The
+# ETHEREUM_JSONRPC_HTTP_URL assert added alongside it is what now catches a
+# neutral or mis-pointed build.
+# There is deliberately NO ETHEREUM_JSONRPC_WS_URL here.
+#
+# The endpoint's WebSocket works — it upgrades (101) and carries JSON-RPC — but
+# it has no PUBSUB: eth_subscribe returns "Method not found", matching the
+# bootnodes README's note that eth-rpc ships neither a filter API nor pubsub.
+# Blockscout treats a new-heads subscription as optional and polls
+# eth_blockNumber instead, so setting a WS URL here would advertise a capability
+# that does not exist.
+#
+# Verified rather than assumed (QUI-992 rehearsal, 2026-08-11): the backend was
+# recreated with the variable FULLY unset (0 occurrences in the container env)
+# and the realtime fetcher stayed 0-1 blocks behind head across four minutes,
+# with zero websocket errors logged — identical to running with it set.
+ENV ETHEREUM_JSONRPC_VARIANT=${BAKE_PROD_ENV:+anvil} \
+    ETHEREUM_JSONRPC_HTTP_URL=${BAKE_PROD_ENV:+https://evm-rpc.aglais.quip.network:20049/} \
+    CHAIN_ID=${BAKE_PROD_ENV:+20033} \
+    FIRST_BLOCK=${BAKE_PROD_ENV:+0}
+
+# ── Fetchers switched OFF ───────────────────────────────────────────────────
+#
+# Blockscout enables roughly two dozen fetchers by default. The four below are
+# disabled because on THIS chain and THIS endpoint they cannot succeed or
+# cannot find anything — not merely because they are unused today.
+#
+#   internal transactions / block rewards
+#     Both derive from tracing. The sidecar has none: trace_block returns
+#     "Method not found" and debug_traceBlockByNumber returns []. Left enabled
+#     they retry forever against an endpoint that can never answer.
+#
+#   pending transactions
+#     Carried over from !65. Nothing depends on a mempool view here.
+#
+#   empty blocks sanitizer
+#     This one matters most. It re-fetches blocks it believes are empty to
+#     confirm they really are. On Quip testnet essentially EVERY block is empty,
+#     so it re-queries the entire chain forever, at batch 10 every 10s, against
+#     evm-rpc.aglais — a single Flux instance with no redundancy that also
+#     serves BD traffic. Measured running continuously before being disabled;
+#     silencing it left the indexing rate unchanged at ~21 blocks/s.
+#
+# Deliberately NOT disabled: the token, NFT/token-instance and coin/token
+# balance fetchers. They are idle today only because the chain has no activity
+# yet, and they are exactly what must work the moment it does. Disabling those
+# would not be conservative — it would make the explorer quietly wrong later.
+#
+# There is no TRACE_FIRST_BLOCK here: it only bounds internal-transaction
+# indexing, which is off, so setting it would be inert config.
+ENV INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER=${BAKE_PROD_ENV:+true} \
+    INDEXER_DISABLE_BLOCK_REWARD_FETCHER=${BAKE_PROD_ENV:+true} \
+    INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER=${BAKE_PROD_ENV:+true} \
+    INDEXER_DISABLE_EMPTY_BLOCKS_SANITIZER=${BAKE_PROD_ENV:+true}
+
+# ── Database connection pool ────────────────────────────────────────────────
+#
+# Blockscout's DEFAULT pools open ~100 Postgres connections and hold them idle:
+# measured during a catchup, 100 connections of which only 1-2 were ever
+# 'active'. Postgres defaults to max_connections=100, so out of the box
+# Blockscout consumes the ENTIRE connection budget and everything else — psql,
+# a monitoring probe, the migration task — fails with "sorry, too many clients
+# already". That is a real failure Roman hit locally, not a theoretical one.
+#
+# The tempting fix is to raise max_connections on the server. That treats the
+# symptom: those connections are not being used. Capping the pools instead is
+# both more conservative and materially cheaper — measured, capping to 20+10
+# took connections 100 -> 31 and Postgres RSS 469 MiB -> 143 MiB with NO
+# reduction in indexing rate (active connections never exceeded 2 either way).
+#
+# With 31 connections against Postgres's default 100 there is ~70 slots of
+# headroom, so bsdb needs no max_connections override at all.
+ENV POOL_SIZE=${BAKE_PROD_ENV:+20} \
+    POOL_SIZE_API=${BAKE_PROD_ENV:+10}
+
+# ── Indexer pacing ──────────────────────────────────────────────────────────
+#
+# Upstream defaults are 10 x 10 = 100 blocks in flight (config/runtime.exs).
+# evm-rpc.aglais is a SINGLE Flux instance with no rate limit configured, no
+# redundancy, and live BD consumers, so we index at 4 x 10 = 40 instead.
+# Measured in the QUI-992 rehearsal: ~24 blocks/s sustained, with the RPC still
+# answering eth_blockNumber in ~0.56s throughout. Raising these is a decision
+# about someone else's endpoint, not a free knob.
+ENV INDEXER_CATCHUP_BLOCKS_CONCURRENCY=${BAKE_PROD_ENV:+4} \
+    INDEXER_CATCHUP_BLOCKS_BATCH_SIZE=${BAKE_PROD_ENV:+10}
+
+# ── Presentation and app URLs ───────────────────────────────────────────────
+#
+# AGLS has no CoinGecko listing; DISABLE_EXCHANGE_RATES stops a steady stream of
+# failed price lookups that would otherwise be the loudest thing in the log.
+# SUBNETWORK must be set explicitly — its default is the long-dead "POA Sokol".
+ENV COIN=${BAKE_PROD_ENV:+AGLS} \
+    COIN_NAME=${BAKE_PROD_ENV:+Aglais} \
+    NETWORK=${BAKE_PROD_ENV:+Quip} \
+    SUBNETWORK="${BAKE_PROD_ENV:+Quip Testnet}" \
+    DISABLE_EXCHANGE_RATES=${BAKE_PROD_ENV:+true} \
+    API_URL=${BAKE_PROD_ENV:+https://explorer.aglais.quip.network} \
+    WEBAPP_URL=${BAKE_PROD_ENV:+https://explorer.aglais.quip.network} \
+    PORT=${BAKE_PROD_ENV:+4000}
+
+# ECTO_USE_SSL defaults to TRUE upstream. bsdb is a sibling component on the
+# app-private Docker network with no TLS, so leaving the default would fail
+# every connection at startup.
+ENV ECTO_USE_SSL=${BAKE_PROD_ENV:+false}
+
+# ── GraphQL ─────────────────────────────────────────────────────────────────
+#
+# ⚠ THIS VARIABLE DOES NOT WORK ON 9.0.2 AND IS NOT WHAT DISABLES GRAPHQL.
+#
+# API_GRAPHQL_ENABLED exists in upstream master (default "true") but is not
+# wired up in the 9.0.2 release — see blockscout/blockscout#11845, the request
+# to add exactly this control. Verified rather than assumed: with the variable
+# baked as false, schema introspection against /api/v1/graphql still returned
+# a full RootQueryType.
+#
+# GraphQL is therefore blocked at the PROXY, in nginx-explorer.conf.template,
+# which is a layer we own and can verify. See the rationale there.
+#
+# It is kept here as forward-defence: when the base image is bumped to a
+# release where the variable is honoured, the app layer will refuse GraphQL on
+# its own rather than depending solely on a proxy rule surviving an edit. That
+# makes it deliberately-inert-with-a-reason, not the accidental kind of inert
+# config this Dockerfile otherwise avoids.
+#
+# If GraphQL is ever wanted, re-enabling means BOTH removing the nginx block and
+# setting an API_GRAPHQL_MAX_COMPLEXITY bound — turning it back on without a
+# complexity limit just restores the original open-ended surface.
+ENV API_GRAPHQL_ENABLED=${BAKE_PROD_ENV:+false}
+
+# NOT baked, supplied by the Flux app spec — these are the only two secrets:
+#   SECRET_KEY_BASE   64 bytes, generated fresh per deployment
+#   DATABASE_URL      postgresql://blockscout:<pw>@fluxbsdb_quipexplorer:5432/blockscout?ssl=false
+
+COPY --chown=blockscout:blockscout entrypoint-api.sh /app/entrypoint-api.sh
+
+# The base image has NO ENTRYPOINT and its CMD is a bare /bin/sh, so Blockscout
+# must be started explicitly. Baking it here rather than putting it in the Flux
+# spec's `commands` keeps the spec small and avoids the "commands is Docker Cmd,
+# not Entrypoint" trap that bites images which DO carry an entrypoint.
+ENTRYPOINT ["/app/entrypoint-api.sh"]

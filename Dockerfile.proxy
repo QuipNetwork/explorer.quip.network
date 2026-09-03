@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Single-origin nginx front for the Quip testnet Blockscout explorer, QUI-992.
+#
+# This component is what makes the whole thing fit on ONE Flux port and
+# therefore ONE FDM custom domain: it serves the frontend at / and routes the
+# backend's paths to bsapi, so the browser talks to a single origin and there is
+# no cross-origin API host, no second certificate and no CORS configuration.
+#
+# It terminates NO TLS — see nginx-explorer.conf.template for why that is
+# deliberate and load-bearing rather than an omission.
+#
+# Build:
+#   docker build -f Dockerfile.proxy --build-arg BAKE_PROD_ENV=1 -t <registry>:proxy-<sha> .
+FROM nginx:alpine
+
+ARG BAKE_PROD_ENV=
+
+# Sibling component addresses on the app-private Docker network. Flux names
+# every container flux<component>_<appname> and assigns it a static IP from a
+# per-app 172.23.<n>.0/24 subnet, where <n> varies by host and CHANGES on
+# relocation — so these must stay DNS names and must never be hardcoded to an
+# address. Verified in production by flux-cpu-nodes/flux-app-spec.json:61,84-85,
+# which addresses its own siblings exactly this way.
+#
+# The port is each component's CONTAINER port, not a published one: bsapi and
+# bsui publish nothing at all.
+ENV PROXY_PORT=${BAKE_PROD_ENV:+20050} \
+    BSAPI_UPSTREAM=${BAKE_PROD_ENV:+fluxbsapi_quipexplorer:4000} \
+    BSUI_UPSTREAM=${BAKE_PROD_ENV:+fluxbsui_quipexplorer:3000}
+
+COPY nginx-explorer.conf.template /etc/nginx/explorer.conf.template
+COPY docker-entrypoint.d/10-render-explorer-conf.sh /docker-entrypoint.d/10-render-explorer-conf.sh
+
+RUN chmod +x /docker-entrypoint.d/10-render-explorer-conf.sh
+
+EXPOSE 20050
+
+# No CMD/ENTRYPOINT override. The base image's /docker-entrypoint.sh runs
+# everything in /docker-entrypoint.d/ in lexical order before exec'ing nginx,
+# so 10-render-explorer-conf.sh lands ahead of the stock
+# 20-envsubst-on-templates.sh (which finds no /etc/nginx/templates and no-ops).

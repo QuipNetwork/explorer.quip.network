@@ -1,0 +1,149 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# nginx config for the Quip testnet Blockscout explorer (QUI-992). Fronts the
+# Blockscout backend and frontend on a single origin so one Flux port — and so
+# one FDM custom domain — serves the whole explorer.
+#
+# ⚠ PLAIN HTTP, DELIBERATELY. This is the one thing not to "fix".
+# Flux's FDM terminates TLS at its load balancer and re-originates CLEARTEXT to
+# the mapped port. An `ssl_certificate` here would make the app unreachable
+# through FDM, and the failure is confusing rather than obvious: FDM would send
+# a plaintext request at a TLS listener and the browser would get nginx's
+# "The plain HTTP request was sent to HTTPS port" 400. That is exactly what
+# checkquipnetwork.app.runonflux.io returns today, because check.quip.network
+# does in-container TLS.
+#
+# Sibling-by-lineage of bootnodes.quip.network/nginx-evmrpc.conf.template, but
+# deliberately NOT a copy: that one terminates TLS itself with a
+# dnsimple-certifier cert on a raw instance IP. This deployment gets its cert
+# from FDM instead, which is what makes AC #5 (cert renewal not manual) hold
+# with no local renewal loop at all.
+#
+# Rendered by docker-entrypoint.d/10-render-explorer-conf.sh via:
+#   envsubst '${PROXY_PORT} ${BSAPI_UPSTREAM} ${BSUI_UPSTREAM}'
+# Only those tokens are substituted, so nginx runtime vars ($http_upgrade,
+# $connection_upgrade, $remote_addr, $proxy_add_x_forwarded_for) survive intact.
+#
+# Env-injected:
+#   PROXY_PORT      20050 (the published Flux port; FDM maps :443 -> here)
+#   BSAPI_UPSTREAM  fluxbsapi_quipexplorer:4000
+#   BSUI_UPSTREAM   fluxbsui_quipexplorer:3000
+
+# Fixed worker count. A Flux container sees the HOST's full core count via
+# nproc (~56 on a Flux node), so `worker_processes auto;` would fan out far
+# beyond this component's 0.5 cpu allocation. Same reasoning as the evm-rpc
+# template; the number differs because the allocation does.
+worker_processes 2;
+error_log /dev/stderr warn;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    access_log off;
+
+    sendfile on;
+    keepalive_timeout 65;
+
+    # Blockscout's API accepts POST bodies that comfortably exceed nginx's 1m
+    # default. A 413 raised here never reaches the backend and is indistinguish-
+    # able, client-side, from the explorer being broken.
+    client_max_body_size 10m;
+
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    upstream bsapi { server ${BSAPI_UPSTREAM}; }
+    upstream bsui  { server ${BSUI_UPSTREAM}; }
+
+    server {
+        listen ${PROXY_PORT};
+        server_name _;
+
+        # Shared proxy headers.
+        #
+        # X-Forwarded-Proto is pinned to https rather than derived from the
+        # request scheme: every intended request arrives over FDM, which
+        # terminated TLS upstream and then spoke cleartext to us, so the
+        # request scheme nginx sees is always http and always understates the
+        # truth. Blockscout also takes its absolute URLs from the baked
+        # API_URL / WEBAPP_URL, so this header is belt-and-braces.
+        #
+        # X-Real-IP is SET from $remote_addr, never forwarded. FDM sets no
+        # X-Real-IP of its own and passes a client-supplied one through
+        # untouched, so forwarding it would hand any caller a header of their
+        # choosing. $remote_addr is the FDM load balancer, which is honest: it
+        # is genuinely our immediate peer.
+        #
+        # ⚠ X-Forwarded-For here is NOT a trustworthy client identity. FDM
+        # appends the real client as the right-most FIELD after any
+        # client-supplied header, and we then append FDM itself — so the real
+        # client ends up SECOND-TO-LAST, and every earlier element is
+        # attacker-controlled. Nothing reads it today. Anything that starts
+        # rate-limiting or logging by IP must take that position deliberately,
+        # not call a framework helper that returns the first element.
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+        proxy_cache_bypass $http_upgrade;
+
+        # ── GraphQL: blocked here, because the app cannot block it ──────────
+        #
+        # Blockscout 9.0.2 exposes /api/v1/graphql and the interactive
+        # /graphiql playground, fully introspectable, with NO query-complexity
+        # bound (API_GRAPHQL_MAX_COMPLEXITY is unset upstream). That is an
+        # open-ended cost surface on a public origin backed by a 0.75-cpu
+        # Postgres, and nothing in this stack consumes it — the frontend uses
+        # /api/v2 and read-only tooling uses the Etherscan-compatible
+        # /api?module= surface.
+        #
+        # The obvious fix, API_GRAPHQL_ENABLED=false, DOES NOT WORK on 9.0.2:
+        # the variable exists in upstream master but is not wired up in this
+        # release (blockscout/blockscout#11845). It is still set in
+        # Dockerfile.api as forward-defence for a future base bump, but it is
+        # NOT what enforces this today — verified by setting it and watching
+        # schema introspection still succeed. nginx is the enforcement.
+        #
+        # `^~` beats the regex location below it in nginx's matching order and
+        # covers sub-paths. 404 rather than 403: no reason to confirm that the
+        # endpoint exists.
+        location ^~ /api/v1/graphql { return 404; }
+        location ^~ /graphiql       { return 404; }
+
+        # Backend routes. Regex and ordering are upstream Blockscout's
+        # (docker-compose/proxy/default.conf.template); the negative lookahead
+        # keeps /api-docs on the FRONTEND while everything else under /api goes
+        # to the backend.
+        location ~ ^/(api(?!-docs$)|socket|sitemap\.xml|auth/auth0|auth/auth0/callback|auth/logout) {
+            proxy_pass http://bsapi;
+
+            # The Phoenix channel behind /socket is a long-lived WebSocket, so
+            # the 60s default read timeout would tear it down on its own.
+            #
+            # ⚠ This does not save the socket end to end: FDM closes idle
+            # WebSockets at ~25s (measured), and Blockscout's Phoenix client
+            # heartbeats at 30s by default. Expect the live-update tiles to
+            # reconnect periodically through FDM. The explorer is fully
+            # functional either way — this timeout just makes sure nginx is not
+            # the component causing it.
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+
+        location / {
+            proxy_pass http://bsui;
+            proxy_read_timeout 60s;
+            proxy_send_timeout 60s;
+        }
+    }
+}
