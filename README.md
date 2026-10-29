@@ -199,9 +199,15 @@ Amounts are plancks (12 decimals); `eth_*` balances are wei (18), bridged by
 
 ## Operational notes
 
-Blockscout's Postgres is **100% derived state**. Nothing in it is authoritative and it is not backed
-up; the recovery for any volume loss is a re-backfill from `FIRST_BLOCK`. That is what makes Flux's
-"changing `hdd` or adding a component destroys the volume" constraint tolerable.
+Blockscout's Postgres is **100% derived state**. Nothing in it is authoritative, and the recovery
+for any volume loss is a re-backfill from `FIRST_BLOCK`. That is what makes Flux's "changing `hdd`
+or adding a component destroys the volume" constraint tolerable.
+
+A relocation does not have to cost that re-backfill. `bsdb` runs the db image of
+[flux-postgres-backup-restore](https://gitlab.com/quip.network/flux-postgres-backup-restore), and the
+`bsbak` component dumps it to Storj every hour. After a relocation, `bsdb` restores the newest dump
+and Blockscout catches up from there. A missing or bad dump only means the re-backfill. `bsbak` pings
+the OneUptime monitor `explorer: postgres backup` after every stored dump.
 
 Cert renewal is **FDM's**, on a ~90-day Let's Encrypt cycle. There is no dnsimple-certifier, no
 `flux-dns-controller` registry entry, no capability token and no Tarsnap cert seeding — the entire
