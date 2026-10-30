@@ -190,7 +190,7 @@
         "S3_SECRET_KEY=<REPLACE>",
         "S3_PREFIX=explorer-postgres/aglais-542a9915",
         "DUMP_NAME=blockscout",
-        "HEIGHT_SQL=select case when max(number) is null then 0 else max(number) end from blocks where consensus"
+        "HEIGHT_SQL=select count(*) from blocks where consensus"
       ],
       "commands": [],
       "cpu": 0.75,
@@ -275,7 +275,7 @@
         "S3_SECRET_KEY=<REPLACE>",
         "S3_PREFIX=explorer-postgres/aglais-542a9915",
         "DUMP_NAME=blockscout",
-        "HEIGHT_SQL=select case when max(number) is null then 0 else max(number) end from blocks where consensus",
+        "HEIGHT_SQL=select count(*) from blocks where consensus",
         "HEARTBEAT_URL=<REPLACE>",
         "BACKUP_INTERVAL=3600",
         "BACKUP_RETENTION=6"
