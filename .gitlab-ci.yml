@@ -14,3 +14,6 @@ secret_detection:
   stage: secret-detection
 include:
 - template: Security/Secret-Detection.gitlab-ci.yml
+- project: quip.network/ci-templates
+  ref: v1.0.0
+  file: templates/dependency-gate.yml
