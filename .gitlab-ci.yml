@@ -15,5 +15,10 @@ secret_detection:
 include:
 - template: Security/Secret-Detection.gitlab-ci.yml
 - project: quip.network/ci-templates
-  ref: v1.0.0
+  ref: v1.1.1
   file: templates/dependency-gate.yml
+
+# No other job runs on a stable tag. GitLab creates no pipeline when only .pre and
+# .post jobs match, so the gate runs in the test stage instead.
+dependency-gate:
+  stage: test
