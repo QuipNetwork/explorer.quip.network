@@ -15,7 +15,7 @@ secret_detection:
 include:
 - template: Security/Secret-Detection.gitlab-ci.yml
 - project: quip.network/ci-templates
-  ref: v1.1.1
+  ref: v1.2.0
   file: templates/dependency-gate.yml
 
 # No other job runs on a stable tag. GitLab creates no pipeline when only .pre and
