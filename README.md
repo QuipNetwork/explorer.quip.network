@@ -10,7 +10,8 @@ up; this repo contains only the packaging, the proxy and the Flux deployment.
 
 | Path | Purpose |
 |---|---|
-| `Dockerfile.{api,ui,proxy}` | The three deployed images — upstream Blockscout plus baked config |
+| `Dockerfile.{api,ui,proxy}` | The three deployed images — Blockscout built from source, plus baked config and a trust-store check |
+| `trust-store/assert-fixed-bundle.sh` | Fails a build whose CA bundle still trusts the forged eMudhra roots (QUI-1930) |
 | `nginx-explorer.conf.template` | Single-origin proxy: UI at `/`, backend at `/api`, `/socket`, … |
 | `deploy/flux/` | Flux v8 app spec (a wizard starting point — the dashboard export is canonical) |
 | `scripts/build-images.sh` | Build/push, amd64-only, asserts the bake landed |
@@ -91,6 +92,22 @@ blind on enterprise apps, and the dashboard only reports failures after the whol
 Blockscout ships a large default-on surface. The rule applied here: **disable what cannot succeed or
 is provably wasted; keep what is merely idle.**
 
+**Contract verification goes through Blockscout's hosted verifier,** by decision (Keith, 2026-11-25).
+`MICROSERVICE_SC_VERIFIER_ENABLED` defaults to true, with `https://eth-bytecode-db.services.blockscout.com`
+as its URL, and we leave both alone:
+
+- **What goes out:** when someone verifies a contract, the explorer sends the submitted source and
+  settings there, and the verify form fetches its compiler list from there. This has been so since the
+  9.0.2 deploy.
+- **What does not:** viewing a contract sends nothing. The on-demand lookup of unverified contracts
+  runs only with `MICROSERVICE_SC_VERIFIER_TYPE=eth_bytecode_db`, and the type defaults to
+  `sc_verifier`. Checked with socket inspection on 2026-11-25.
+- **Why it isn't turned off:** off, Blockscout verifies locally by running `node priv/compile_solc.js`,
+  which needs node and the `solc` npm package. Upstream's image ships neither, so local verification
+  fails with `:enoent`. Adding node and the wrapper from upstream's own lockfile made it work in the
+  rehearsal (`MessageStore` verified, nothing sent to Blockscout). That stays available if the decision
+  changes.
+
 **Indexer fetchers off:** internal transactions and block rewards (both derive from tracing the
 sidecar does not have, so they retry forever); pending transactions; and the **empty-blocks
 sanitizer** — it re-fetches "empty" blocks to confirm them, and on a chain where every block is empty
@@ -113,15 +130,98 @@ only 1–2 are ever active — which exhausts Postgres's default `max_connection
 `POOL_SIZE_API=10`, taking connections to 31 and Postgres RSS from 469 MiB to ~150 MiB with no change
 in indexing rate. `bsdb` therefore needs **no `max_connections` override**.
 
-**GraphQL is blocked at the proxy.** `API_GRAPHQL_ENABLED=false` **does not work on 9.0.2** — the
-variable exists in upstream master but is not wired up in this release
-(blockscout/blockscout#11845); with it baked false, schema introspection still succeeded. Enforcement
-is two `^~` location blocks in nginx returning 404. Re-enabling means removing those **and** setting
-`API_GRAPHQL_MAX_COMPLEXITY`, or the original unbounded surface comes back.
+**GraphQL is blocked at the proxy.** Enforcement is two `^~` location blocks in nginx returning 404.
+`API_GRAPHQL_ENABLED=false` did nothing on 9.0.2, where blockscout/blockscout#11845 had not landed and
+schema introspection still succeeded with it baked false. 12.1.0 reads it, so the app refuses GraphQL
+too. Re-enabling means removing the nginx blocks **and** setting `API_GRAPHQL_MAX_COMPLEXITY`, or the
+original unbounded surface comes back.
 
 `/metrics` is not publicly reachable: it does not match the backend route, so it lands on the
 frontend as a 404. The Etherscan-compatible `proxy` module is absent, so there is no
 `eth_sendRawTransaction` route through the explorer.
+
+## Blockscout is built from source (QUI-2535)
+
+Blockscout stopped publishing public images after backend **9.0.2** and frontend **v2.3.5**. ghcr's
+`blockscout/blockscout` and `blockscout/frontend` end there (`latest` included), and every newer tag
+answers 404. The maintainers say this is on purpose (blockscout#13226, #14381): they point people at
+their hosted Autoscout and Explorer-as-a-Service, and their builds go only to `-private` registries.
+
+So `scripts/build-images.sh` first builds both bases from upstream's own Dockerfiles at commits it
+pins, then our three images `FROM` them:
+
+| Base | Upstream | Pinned commit | Built locally as |
+|---|---|---|---|
+| backend | blockscout/blockscout v12.1.0 | `066e39b5` | `local/blockscout-backend:12.1.0-066e39b5` (3m40s on 22 cores) |
+| frontend | blockscout/frontend v2.13.0 | `d3cfa7ab` | `local/blockscout-frontend:v2.13.0-d3cfa7ab` (6 min) |
+
+Only our images are pushed, and they carry every base layer. A base already built at the pinned
+commit is reused; `REBUILD_BASES=1` rebuilds it. Bumping Blockscout means changing the pins in
+`build-images.sh` (and the default `BLOCKSCOUT_*IMAGE` in the Dockerfiles), then rehearsing.
+
+**What changed from 9.0.2 that our settings had to follow:**
+
+- **`ECTO_SSL_MODE=disable` replaces `ECTO_USE_SSL=false`.** 12.1.0 does not read `ECTO_USE_SSL`
+  at all, and it ignores the `ssl=false` in our `DATABASE_URL`; it only knows `sslmode`. Its default
+  is `require`, so without this every connection to `bsdb` fails at startup.
+- **`DISABLE_MARKET` replaces `DISABLE_EXCHANGE_RATES`.** The old name still works as a fallback.
+- **An existing 9.0.2 database cannot be upgraded straight to 12.x:** v11.0.0 "must be installed on
+  top of v10.1". We re-index from scratch instead; see "Moving to 12.1.0" below.
+- **The frontend refuses to start on an empty value it does not accept** (since v2.10.0). Production
+  bakes real values. The neutral rehearsal image leaves some empty, so the rehearsal compose sets them.
+
+**Trust store.** Each image upgrades Alpine's CA bundle and fails the build unless it is the fixed
+one. The API also checks the CA files Blockscout's Elixir libraries carry (castore, certifi). Checked
+inside the images on 2026-11-25 against the forged-root test hosts `dv-g3b-emudhra` and
+`dv-g3b-aaa-emudhra` (`.we-have-a-problem.com`), with observe.quip.network as the control:
+
+| Client | Trusts | Forged hosts | Control |
+|---|---|---|---|
+| API: Mint, which the RPC transport uses (castore 1.0.22) | castore's file | refused | reached |
+| API: hackney (certifi 2.18.0) | certifi's file | refused | reached |
+| API: `:httpc` | the OS bundle | refused | reached |
+| UI: node 24.21.0, **upstream's image as built** | node's own roots | **G3B accepted** | reached |
+| UI: node 24.21.0, **ours** (`NODE_OPTIONS=--use-openssl-ca` + fixed bundle) | the OS bundle | refused | reached |
+
+certifi's compiled root list holds no forged root either. The UI row is the reason the layer exists:
+upstream's v2.13.0 image trusts the forged chain through node's bundled roots.
+
+### Moving to 12.1.0: a fresh re-index
+
+An explorer's database is an index of the chain, so the move re-indexes from block 0 instead of
+upgrading the 9.0.2 database in place (which would have to pass through v10.1 first). One spec
+update carries it, together with QUI-2534's sidecar image:
+
+| Component | Change |
+|---|---|
+| `bsapi`, `bsui`, `bsproxy` | repotags to the new from-source images |
+| `bsbak` | repotag to the guarded sidecar (QUI-2534) |
+| `bsdb`, `bsbak` | `S3_PREFIX=explorer-postgres/aglais-c7145a3f-bs12`: a new, empty prefix naming the current chain, so `bsdb` finds no dump and starts empty |
+| `bsdb` | `PGDATA=/var/lib/postgresql/data/pgdata-bs12`: a new data directory, so a kept volume's 9.0.2 data is ignored |
+
+Write down the current repotags, `S3_PREFIX` and `PGDATA` before changing them. All three together
+are the **rollback**, and the 9.0.2 database and its dumps are left untouched for it.
+
+**What the explorer shows meanwhile.** Blockscout indexes from the chain head **down** to block 0, so
+the newest blocks and transactions appear within minutes and older history fills in behind them.
+Until that finishes, history is partial and `/api/v2/stats` totals run low: they come from
+Postgres's planner estimate, which a fresh table updates only after autovacuum analyzes it.
+The "indexed" ratio in `/api/v2/main-page/indexing-status` is built on that same count, cached for
+`CACHE_BLOCK_COUNT_PERIOD` (2 h by default). So it can trail the real state by up to two hours after
+the backfill ends: the data is complete and served while the figure still reads, say, 0.73.
+
+Rehearsed on 2026-11-25, with our 12.1.0 images on an empty database at production's pacing (4 × 10
+blocks in flight):
+
+- **The backfill:** all 168,683 blocks in 10,850 s (3 h 01 m, about 15.5 blocks/s), against the live
+  EVM RPC, into a 170 MiB database.
+- **Checked against production's 9.0.2:** five sample block hashes (1, 53,340, 100,000, 150,000 and
+  168,000) and `MessageStore`'s creating transaction matched, and so did the transaction total (386).
+
+**The one thing the chain cannot give back** is verified source code. On 2026-11-25 there was one
+verified contract, `MessageStore` at `0x9785D9d0953611c2Ab66Bbb97b470b45d90fc721`: Solidity
+v0.8.24+commit.e11b9ed9, optimization on with 200 runs, default EVM version, MIT. It is re-submitted
+after the move through `/api/v2/smart-contracts/<address>/verification/via/flattened-code`.
 
 ## Deploying
 
@@ -157,9 +257,9 @@ is not one. Use `repo:TAG@sha256:DIGEST`: the regex stops at the `@` and ignores
 Docker still honours the digest on pull. The dashboard reports only the **first** offending component,
 so fix all of them at once. `scripts/validate-spec.py` now enforces this.
 
-**Blockscout cannot parse an underscore in the DB hostname.** Blockscout 9.0.2 extracts DB parameters
-from `DATABASE_URL` with a regex (`explorer/repo/config_helper.ex:63`) whose hostname class is letters,
-digits, hyphen and dot. Flux's inter-component DNS name is *always* `flux<component>_<appname>`, so the
+**Blockscout cannot parse an underscore in the DB hostname.** Blockscout extracts DB parameters
+from `DATABASE_URL` with a regex (`explorer/repo/config_helper.ex`, line 63 in 9.0.2 and line 130 in
+12.1.0, unchanged) whose hostname class is letters, digits, hyphen and dot. Flux's inter-component DNS name is *always* `flux<component>_<appname>`, so the
 URL never matches, `Regex.named_captures` returns `nil`, and `Keyword.new(nil)` raises
 `(Protocol.UndefinedError) protocol Enumerable not implemented for nil` during repo init — before a
 socket is opened. It therefore looks exactly like "the database is not up yet", and no amount of

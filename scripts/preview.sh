@@ -32,19 +32,24 @@ PREVIEW_PORT=${PORT}
 EOF
 }
 
-build_if_missing() {
+# Always rebuilt (layer cache makes it seconds): a :local image left over from an
+# older base would otherwise run silently, which is how a 9.0.2 preview could
+# pass for a 12.1.0 one. The bases come from scripts/build-images.sh (QUI-2535).
+build_local() {
+    for base in "local/blockscout-backend:12.1.0-066e39b5" "local/blockscout-frontend:v2.13.0-d3cfa7ab"; do
+        docker image inspect "${base}" >/dev/null 2>&1 \
+            || { log "FATAL: base image ${base} is missing; run scripts/build-images.sh first"; exit 1; }
+    done
     for role in api ui proxy; do
-        if ! docker image inspect "quip-explorer-${role}:local" >/dev/null 2>&1; then
-            log "building quip-explorer-${role}:local"
-            docker build -q -f "${REPO_DIR}/Dockerfile.${role}" \
-                --build-arg BAKE_PROD_ENV=1 \
-                -t "quip-explorer-${role}:local" "${REPO_DIR}" >/dev/null
-        fi
+        log "building quip-explorer-${role}:local"
+        BUILDX_BUILDER=default docker build -q -f "${REPO_DIR}/Dockerfile.${role}" \
+            --build-arg BAKE_PROD_ENV=1 \
+            -t "quip-explorer-${role}:local" "${REPO_DIR}" >/dev/null
     done
 }
 
 cmd_up() {
-    gen_env; build_if_missing
+    gen_env; build_local
     dc up -d
     # Wait for the FRONTEND, not just the API. The Next.js image spends a
     # couple of minutes downloading assets and validating env before it binds,

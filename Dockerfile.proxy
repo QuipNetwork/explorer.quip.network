@@ -14,6 +14,14 @@
 #   docker build -f Dockerfile.proxy --build-arg BAKE_PROD_ENV=1 -t <registry>:proxy-<sha> .
 FROM nginx:alpine
 
+# Trust store (QUI-1930). nginx here makes no outbound TLS (its upstreams are the
+# app's own http components), but the image is rebuilt with the rest, so it gets
+# the same check: a fixed Alpine bundle or no image.
+COPY trust-store/assert-fixed-bundle.sh /tmp/assert-fixed-bundle.sh
+RUN apk add --no-cache --upgrade ca-certificates-bundle \
+ && sh /tmp/assert-fixed-bundle.sh /etc/ssl/certs/ca-certificates.crt \
+ && rm /tmp/assert-fixed-bundle.sh
+
 ARG BAKE_PROD_ENV=
 
 # Sibling component addresses on the app-private Docker network. Flux names

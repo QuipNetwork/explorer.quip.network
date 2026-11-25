@@ -15,11 +15,40 @@
 # same Dockerfile without inheriting production constants. Docker ENV stays
 # overridable at runtime, so the Flux spec still wins over anything baked.
 #
+# ── The base: Blockscout built from source (QUI-2535) ───────────────────────
+#
+# Blockscout stopped publishing public images after 9.0.2. ghcr's
+# blockscout/blockscout ends there, and the maintainers say that is on purpose
+# (blockscout#13226, #14381), pointing at their hosted offerings. So
+# scripts/build-images.sh builds the base from upstream's own docker/Dockerfile
+# at a pinned commit and passes it in as BLOCKSCOUT_IMAGE. The default below is
+# that script's local tag: build through the script, not by hand.
+#
 # Build:
-#   docker build -f Dockerfile.api --build-arg BAKE_PROD_ENV=1 -t <registry>:api-<sha> .
-FROM ghcr.io/blockscout/blockscout:9.0.2
+#   scripts/build-images.sh   (builds the base, then this with BAKE_PROD_ENV=1)
+ARG BLOCKSCOUT_IMAGE=local/blockscout-backend:12.1.0-066e39b5
+FROM ${BLOCKSCOUT_IMAGE}
 
 ARG BAKE_PROD_ENV=
+
+# ── Trust store (QUI-1930) ──────────────────────────────────────────────────
+#
+# Blockscout verifies its outbound TLS through three bundles: Alpine's, and the
+# Elixir packages castore and certifi, which carry their own copies. 9.0.2 had
+# the forged eMudhra roots in all three. 12.1.0's castore 1.0.22 and certifi
+# 2.18.0 dropped emSign ECC Root CA - G3 upstream. The build fails unless all
+# three are clean, so the fix is proven at every build rather than assumed from
+# a version number. It sends no credentials, but a forged certificate for the
+# EVM RPC could feed the public explorer false chain data.
+USER root
+COPY trust-store/assert-fixed-bundle.sh /tmp/assert-fixed-bundle.sh
+RUN apk add --no-cache --upgrade ca-certificates-bundle \
+ && sh /tmp/assert-fixed-bundle.sh /etc/ssl/certs/ca-certificates.crt \
+ && for f in /app/lib/castore-*/priv/cacerts.pem /app/lib/certifi-*/priv/cacerts.pem; do \
+        sh /tmp/assert-fixed-bundle.sh "$f" || exit 1; \
+    done \
+ && rm /tmp/assert-fixed-bundle.sh
+USER blockscout:blockscout
 
 # ── Chain identity and the RPC it indexes ───────────────────────────────────
 #
@@ -134,41 +163,38 @@ ENV INDEXER_CATCHUP_BLOCKS_CONCURRENCY=${BAKE_PROD_ENV:+4} \
 
 # ── Presentation and app URLs ───────────────────────────────────────────────
 #
-# AGLS has no CoinGecko listing; DISABLE_EXCHANGE_RATES stops a steady stream of
-# failed price lookups that would otherwise be the loudest thing in the log.
+# AGLS has no CoinGecko listing; DISABLE_MARKET stops a steady stream of failed
+# price lookups that would otherwise be the loudest thing in the log. It was
+# DISABLE_EXCHANGE_RATES until upstream renamed it in v8.0.0; 12.1.0 still reads
+# the old name as a fallback, but the old name is the one that will go.
 # SUBNETWORK must be set explicitly — its default is the long-dead "POA Sokol".
 ENV COIN=${BAKE_PROD_ENV:+AGLS} \
     COIN_NAME=${BAKE_PROD_ENV:+Aglais} \
     NETWORK=${BAKE_PROD_ENV:+Quip} \
     SUBNETWORK="${BAKE_PROD_ENV:+Quip Testnet}" \
-    DISABLE_EXCHANGE_RATES=${BAKE_PROD_ENV:+true} \
+    DISABLE_MARKET=${BAKE_PROD_ENV:+true} \
     API_URL=${BAKE_PROD_ENV:+https://explorer.aglais.quip.network} \
     WEBAPP_URL=${BAKE_PROD_ENV:+https://explorer.aglais.quip.network} \
     PORT=${BAKE_PROD_ENV:+4000}
 
-# ECTO_USE_SSL defaults to TRUE upstream. bsdb is a sibling component on the
-# app-private Docker network with no TLS, so leaving the default would fail
-# every connection at startup.
-ENV ECTO_USE_SSL=${BAKE_PROD_ENV:+false}
+# bsdb is a sibling component on the app-private Docker network with no TLS,
+# so the backend must not try TLS to it. On 12.x the only switch is
+# ECTO_SSL_MODE: ECTO_USE_SSL was deprecated in v11.1.0 and 12.1.0 does not read
+# it at all. Next it reads `sslmode` from DATABASE_URL (not the `ssl=false` our
+# URL carries), and the default is `require`, which would fail every
+# connection at startup.
+ENV ECTO_SSL_MODE=${BAKE_PROD_ENV:+disable}
 
 # ── GraphQL ─────────────────────────────────────────────────────────────────
 #
-# ⚠ THIS VARIABLE DOES NOT WORK ON 9.0.2 AND IS NOT WHAT DISABLES GRAPHQL.
+# GraphQL is blocked at the PROXY, in nginx-explorer.conf.template, which is a
+# layer we own and can verify. See the rationale there.
 #
-# API_GRAPHQL_ENABLED exists in upstream master (default "true") but is not
-# wired up in the 9.0.2 release — see blockscout/blockscout#11845, the request
-# to add exactly this control. Verified rather than assumed: with the variable
-# baked as false, schema introspection against /api/v1/graphql still returned
-# a full RootQueryType.
-#
-# GraphQL is therefore blocked at the PROXY, in nginx-explorer.conf.template,
-# which is a layer we own and can verify. See the rationale there.
-#
-# It is kept here as forward-defence: when the base image is bumped to a
-# release where the variable is honoured, the app layer will refuse GraphQL on
-# its own rather than depending solely on a proxy rule surviving an edit. That
-# makes it deliberately-inert-with-a-reason, not the accidental kind of inert
-# config this Dockerfile otherwise avoids.
+# On 9.0.2 this variable did nothing: blockscout/blockscout#11845 had not
+# landed, and with it baked false, introspection against /api/v1/graphql still
+# returned a full RootQueryType. 12.1.0 reads it (config/runtime.exs), so the
+# app layer now refuses GraphQL on its own too, and a proxy rule lost in an
+# edit no longer reopens it. Check that in the rehearsal, not here.
 #
 # If GraphQL is ever wanted, re-enabling means BOTH removing the nginx block and
 # setting an API_GRAPHQL_MAX_COMPLEXITY bound — turning it back on without a
@@ -178,11 +204,13 @@ ENV API_GRAPHQL_ENABLED=${BAKE_PROD_ENV:+false}
 # NOT baked, supplied by the Flux app spec — these are the only two secrets:
 #   SECRET_KEY_BASE   64 bytes, generated fresh per deployment
 #   DATABASE_URL      postgresql://blockscout:<pw>@fluxbsdb_quipexplorer:5432/blockscout?ssl=false
+#                     (12.x ignores `ssl=false`; ECTO_SSL_MODE above is what turns TLS off)
 
 COPY --chown=blockscout:blockscout entrypoint-api.sh /app/entrypoint-api.sh
 
-# The base image has NO ENTRYPOINT and its CMD is a bare /bin/sh, so Blockscout
-# must be started explicitly. Baking it here rather than putting it in the Flux
+# Upstream's docker/Dockerfile sets neither ENTRYPOINT nor CMD (true of 9.0.2
+# and 12.1.0), so the image only inherits the Elixir base image's command.
+# Blockscout must be started explicitly. Baking it here rather than putting it in the Flux
 # spec's `commands` keeps the spec small and avoids the "commands is Docker Cmd,
 # not Entrypoint" trap that bites images which DO carry an entrypoint.
 ENTRYPOINT ["/app/entrypoint-api.sh"]

@@ -32,6 +32,12 @@
 # found" and debug_traceBlockByNumber returns [] on this sidecar, so internal
 # transactions and block rewards are genuinely unavailable.
 #
+# Since QUI-2535 it runs OUR images, built from Dockerfile.api and Dockerfile.ui
+# without BAKE_PROD_ENV (neutral) on the from-source 12.1.0 bases that
+# scripts/build-images.sh builds. So a rehearsal now exercises our entrypoint,
+# our trust-store layer and our settings, not upstream's image beside them.
+# Build the bases first (scripts/build-images.sh), then rehearse.
+#
 # Usage: scripts/rehearse.sh  (do not `docker compose up` directly — the script
 # generates SECRET_KEY_BASE and starts the sampler).
 name: quip-explorer-rehearsal
@@ -65,7 +71,12 @@ services:
       start_period: 10s
 
   bsapi:
-    image: ghcr.io/blockscout/blockscout:9.0.2
+    image: quip-explorer-api:rehearsal
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        BLOCKSCOUT_IMAGE: ${BLOCKSCOUT_IMAGE:-local/blockscout-backend:12.1.0-066e39b5}
     container_name: qer-bsapi
     restart: on-failure:5
     depends_on:
@@ -73,7 +84,7 @@ services:
         condition: service_healthy
     # The image's default CMD is a bare /bin/sh; Blockscout must be started
     # explicitly, running migrations first. Carried over from !65.
-    command: sh -c "bin/blockscout eval 'Elixir.Explorer.ReleaseTasks.create_and_migrate()' && bin/blockscout start"
+    # No command: our image's entrypoint (entrypoint-api.sh) migrates, then starts.
     environment:
       ETHEREUM_JSONRPC_VARIANT: anvil
       ETHEREUM_JSONRPC_HTTP_URL: ${QUIP_EVM_RPC_HTTP:-https://evm-rpc.aglais.quip.network:20049/}
@@ -94,13 +105,13 @@ services:
       POOL_SIZE_API: "${QUIP_POOL_SIZE_API:-10}"
       # No CoinGecko listing for AGLS; leaving this on produces a steady stream
       # of failed price lookups that muddies the log we are trying to read.
-      DISABLE_EXCHANGE_RATES: "true"
+      DISABLE_MARKET: "true"
       COIN: AGLS
       COIN_NAME: Aglais
       NETWORK: Quip
       SUBNETWORK: Quip Testnet
       DATABASE_URL: postgresql://blockscout:${POSTGRES_PASSWORD:?}@bsdb:5432/blockscout?ssl=false
-      ECTO_USE_SSL: "false"
+      ECTO_SSL_MODE: disable
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set by scripts/rehearse.sh}
       PORT: "4000"
       # Deliberately conservative for the first run. evm-rpc.aglais is a SINGLE
@@ -115,7 +126,12 @@ services:
       - "${REHEARSAL_API_PORT:-4000}:4000"
 
   bsui:
-    image: ghcr.io/blockscout/frontend:v2.3.5
+    image: quip-explorer-ui:rehearsal
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+      args:
+        BLOCKSCOUT_FRONTEND_IMAGE: ${BLOCKSCOUT_FRONTEND_IMAGE:-local/blockscout-frontend:v2.13.0-d3cfa7ab}
     container_name: qer-bsui
     restart: on-failure:5
     depends_on:
@@ -137,6 +153,15 @@ services:
       # (1_000_000, runtime/src/configs/mod.rs:232). Carried over from !65.
       NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS: "18"
       NEXT_PUBLIC_NETWORK_RPC_URL: ${QUIP_EVM_RPC_HTTP:-https://evm-rpc.aglais.quip.network:20049/}
+      # The same feature choices Dockerfile.ui bakes for production (ads off, no
+      # gas tracker, no marketplace). They must be SET here: the neutral image
+      # defines them as empty strings, and since v2.10.0 the frontend refuses
+      # to start on an empty value it does not accept.
+      NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL: ws
+      NEXT_PUBLIC_AD_BANNER_PROVIDER: none
+      NEXT_PUBLIC_AD_TEXT_PROVIDER: none
+      NEXT_PUBLIC_GAS_TRACKER_ENABLED: "false"
+      NEXT_PUBLIC_MARKETPLACE_ENABLED: "false"
     ports:
       - "${REHEARSAL_UI_PORT:-3000}:3000"
 
