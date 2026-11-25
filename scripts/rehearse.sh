@@ -134,8 +134,16 @@ CSV_HEADER='ts_utc,elapsed_s,rpc_head,target_blocks,indexed_min,indexed_max,cons
 cmd_up() {
     gen_env
     mkdir -p "${OUT_DIR}"
-    log "pulling images (blockscout 9.0.2 / frontend v2.3.5 / postgres 17-alpine)"
-    dc pull --quiet
+    # bsapi and bsui are OUR images on the from-source bases (QUI-2535), built
+    # here; only postgres is pulled. The bases come from scripts/build-images.sh.
+    for base in "${BLOCKSCOUT_IMAGE:-local/blockscout-backend:12.1.0-066e39b5}" \
+                "${BLOCKSCOUT_FRONTEND_IMAGE:-local/blockscout-frontend:v2.13.0-d3cfa7ab}"; do
+        docker image inspect "${base}" >/dev/null 2>&1 \
+            || { log "FATAL: base image ${base} is missing; run scripts/build-images.sh first"; exit 1; }
+    done
+    log "pulling postgres 17-alpine, building bsapi and bsui (neutral)"
+    dc pull --quiet bsdb
+    BUILDX_BUILDER=default dc build --quiet bsapi bsui
     log "starting stack"
     dc up -d
     date -u +%s >"${START_MARKER}"

@@ -12,9 +12,35 @@
 # start and writes them into the client bundle, so they must be real ENV at
 # runtime rather than build-time ARGs, and the entrypoint must NOT be overridden.
 #
+# ── The base: the Blockscout frontend built from source (QUI-2535) ──────────
+#
+# Like the backend, the frontend's public images stopped (ghcr's
+# blockscout/frontend ends at v2.3.5), so scripts/build-images.sh builds it from
+# upstream's own Dockerfile at a pinned commit and passes it in as
+# BLOCKSCOUT_FRONTEND_IMAGE. v2.12.0 and later need backend 12.0 or later, which
+# Dockerfile.api provides. Build through the script, not by hand.
+#
 # Build:
-#   docker build -f Dockerfile.ui --build-arg BAKE_PROD_ENV=1 -t <registry>:ui-<sha> .
-FROM ghcr.io/blockscout/frontend:v2.3.5
+#   scripts/build-images.sh   (builds the base, then this with BAKE_PROD_ENV=1)
+ARG BLOCKSCOUT_FRONTEND_IMAGE=local/blockscout-frontend:v2.13.0-d3cfa7ab
+FROM ${BLOCKSCOUT_FRONTEND_IMAGE}
+
+# ── Trust store (QUI-1930) ──────────────────────────────────────────────────
+#
+# The Next.js server fetches over HTTPS (the API is the public origin), and
+# upstream's runner stage is node:24.21.0-alpine, older than the 24.22.1 whose
+# bundled roots dropped emSign ECC Root CA - G3. As QUI-1930's rule for an
+# upstream image goes: make node verify through the OS bundle
+# (--use-openssl-ca), and make that bundle the fixed one, failing the build if
+# it is not. Upstream's entrypoint sets no NODE_OPTIONS of its own, so this
+# reaches every node process it starts.
+USER root
+COPY trust-store/assert-fixed-bundle.sh /tmp/assert-fixed-bundle.sh
+RUN apk add --no-cache --upgrade ca-certificates-bundle \
+ && sh /tmp/assert-fixed-bundle.sh /etc/ssl/certs/ca-certificates.crt \
+ && rm /tmp/assert-fixed-bundle.sh
+ENV NODE_OPTIONS=--use-openssl-ca
+USER nextjs
 
 ARG BAKE_PROD_ENV=
 
